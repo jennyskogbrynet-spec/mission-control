@@ -1428,7 +1428,29 @@ const migrations: Migration[] = [
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN signature TEXT DEFAULT NULL`)
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN public_key TEXT DEFAULT NULL`)
     }
-  }
+  },
+  {
+    id: '051_task_claim_state',
+    up(db: Database.Database) {
+      // Symphony-inspired claim-state machine for atomic worker locking, distinct
+      // from workflow `status`. States: Unclaimed → Claimed → Running → RetryQueued → Released.
+      // claimed_at is set on the Claimed transition and read by the stall-guard cron
+      // which requeues stuck claims older than 5 minutes.
+      // retry_count already exists from migration 026 — reused, not re-added.
+      const taskCols = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>
+      const hasCol = (name: string) => taskCols.some((c) => c.name === name)
+
+      if (!hasCol('claim_state'))
+        db.exec(`ALTER TABLE tasks ADD COLUMN claim_state TEXT NOT NULL DEFAULT 'Unclaimed'`)
+      if (!hasCol('claimed_by')) db.exec(`ALTER TABLE tasks ADD COLUMN claimed_by TEXT`)
+      if (!hasCol('claimed_at')) db.exec(`ALTER TABLE tasks ADD COLUMN claimed_at INTEGER`)
+
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_claim_state ON tasks(claim_state)`)
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_tasks_claimed_active ON tasks(claim_state, claimed_at) WHERE claim_state IN ('Claimed', 'Running')`,
+      )
+    },
+  },
 ]
 
 export function runMigrations(db: Database.Database) {
