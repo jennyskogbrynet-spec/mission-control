@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     const url = new URL(request.url)
     const raw = url.searchParams.get('threshold_secs')
     let threshold = raw ? parseInt(raw, 10) : DEFAULT_THRESHOLD_SECS
-    if (!Number.isFinite(threshold) || threshold <= 0) threshold = DEFAULT_THRESHOLD_SECS
+    if (!Number.isFinite(threshold) || threshold < 0) threshold = DEFAULT_THRESHOLD_SECS
     if (threshold > MAX_THRESHOLD_SECS) threshold = MAX_THRESHOLD_SECS
 
     const db = getDatabase()
