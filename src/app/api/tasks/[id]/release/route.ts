@@ -62,8 +62,10 @@ export async function POST(
     }
 
     const now = Math.floor(Date.now() / 1000)
-    const isAdmin = auth.user.role === 'admin'
 
+    // Ownership is always enforced. The shared API key cannot bypass — supervisors
+    // and the stall-guard use /requeue (which has no owner check) to forcibly free
+    // a stuck claim.
     const release = db.transaction(() => {
       return db
         .prepare(
@@ -72,10 +74,10 @@ export async function POST(
           SET claim_state = 'Released', claimed_by = NULL, claimed_at = NULL, updated_at = ?
           WHERE id = ? AND workspace_id = ?
             AND claim_state IN ('Claimed', 'Running')
-            ${isAdmin ? '' : 'AND claimed_by = ?'}
+            AND claimed_by = ?
           `,
         )
-        .run(...(isAdmin ? [now, taskId, workspaceId] : [now, taskId, workspaceId, agent])).changes
+        .run(now, taskId, workspaceId, agent).changes
     })
 
     const changedRows = release()
