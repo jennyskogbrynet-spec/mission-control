@@ -96,7 +96,6 @@ function parseIdentityFromFile(content: string): { name?: string; theme?: string
     ...(name ? { name } : {}),
     ...(theme ? { theme } : {}),
     ...(emoji ? { emoji } : {}),
-    content: lines.slice(0, 8).join('\n'),
   }
 }
 
