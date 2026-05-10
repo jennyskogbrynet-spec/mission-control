@@ -4,6 +4,7 @@ import { eventBus } from '@/lib/event-bus'
 import { requireRole } from '@/lib/auth'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
+import { getClaimAgeMs } from '@/lib/claim-time'
 
 const DEFAULT_THRESHOLD_SECS = 300
 const MAX_THRESHOLD_SECS = 24 * 60 * 60
@@ -38,26 +39,31 @@ export async function POST(request: NextRequest) {
 
     const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
-    const cutoff = Math.floor(Date.now() / 1000) - threshold
     const now = Math.floor(Date.now() / 1000)
 
     const sweep = db.transaction(() => {
-      const candidates = db
+      const activeClaims = db
         .prepare(
           `
-          SELECT id, claimed_by, retry_count
+          SELECT id, claimed_by, claimed_at, retry_count
           FROM tasks
           WHERE workspace_id = ?
             AND claim_state IN ('Claimed', 'Running')
             AND claimed_at IS NOT NULL
-            AND claimed_at < ?
           `,
         )
-        .all(workspaceId, cutoff) as Array<{
+        .all(workspaceId) as Array<{
         id: number
         claimed_by: string | null
+        claimed_at: string | number | null
         retry_count: number
       }>
+
+      const thresholdMs = threshold * 1000
+      const candidates = activeClaims.filter((claim) => {
+        const claimAgeMs = getClaimAgeMs(claim.claimed_at)
+        return claimAgeMs !== null && claimAgeMs >= thresholdMs
+      })
 
       if (candidates.length === 0) return { swept: 0, requeued: [] as number[] }
 

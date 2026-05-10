@@ -27,7 +27,7 @@ describe('051_task_claim_state migration', () => {
     expect(byName.claimed_by.notnull).toBe(0)
 
     expect(byName.claimed_at).toBeDefined()
-    expect(byName.claimed_at.type).toBe('INTEGER')
+    expect(byName.claimed_at.type).toBe('TEXT')
     expect(byName.claimed_at.notnull).toBe(0)
 
     // retry_count already exists from migration 026, but Phase 1 reuses it.

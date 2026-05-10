@@ -5,6 +5,7 @@ import { validateBody, qualityReviewSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 import { eventBus } from '@/lib/event-bus'
+import { isActiveClaim } from '@/lib/claim-time'
 
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
@@ -83,10 +84,36 @@ export async function POST(request: NextRequest) {
     const workspaceId = auth.user.workspace_id ?? 1;
 
     const task = db
-      .prepare('SELECT id, title FROM tasks WHERE id = ? AND workspace_id = ?')
-      .get(taskId, workspaceId) as any
+      .prepare('SELECT id, title, assigned_to, retry_count, tags, claim_state, claimed_at FROM tasks WHERE id = ? AND workspace_id = ?')
+      .get(taskId, workspaceId) as
+        | {
+            id: number
+            title: string
+            assigned_to: string | null
+            retry_count: number | null
+            tags: string | null
+            claim_state: string | null
+            claimed_at: string | number | null
+          }
+        | undefined
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 })
+    }
+
+    if (status === 'in_progress') {
+      return NextResponse.json({ success: true, wait: true, reason: 'in_progress' })
+    }
+
+    if (status === 'rejected') {
+      const { active, claimAgeMs } = isActiveClaim(task.claim_state, task.claimed_at)
+      if (active) {
+        return NextResponse.json({
+          success: true,
+          deferred: true,
+          reason: 'agent_active',
+          claim_age_ms: claimAgeMs,
+        })
+      }
     }
 
     const result = db.prepare(`

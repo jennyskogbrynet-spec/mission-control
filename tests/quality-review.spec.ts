@@ -45,6 +45,75 @@ test.describe('Quality Review', () => {
     expect(res.status()).toBe(404)
   })
 
+  test('POST defers rejection while task has a fresh active claim', async ({ request }) => {
+    const { id: taskId } = await createTestTask(request, { status: 'review' })
+    cleanup.push(taskId)
+
+    const claim = await request.post(`/api/tasks/${taskId}/claim`, {
+      headers: API_KEY_HEADER,
+      data: { agent: 'stella' },
+    })
+    expect(claim.status()).toBe(200)
+
+    const res = await request.post('/api/quality-review', {
+      headers: API_KEY_HEADER,
+      data: {
+        taskId,
+        reviewer: 'aegis',
+        status: 'rejected',
+        notes: 'Needs more work',
+      },
+    })
+
+    expect(res.status()).toBe(200)
+    const body = await res.json()
+    expect(body.success).toBe(true)
+    expect(body.deferred).toBe(true)
+    expect(body.reason).toBe('agent_active')
+    expect(body.claim_age_ms).toBeGreaterThanOrEqual(0)
+    expect(body.claim_age_ms).toBeLessThan(15 * 60 * 1000)
+
+    const taskRes = await request.get(`/api/tasks/${taskId}`, { headers: API_KEY_HEADER })
+    expect(taskRes.status()).toBe(200)
+    const taskBody = await taskRes.json()
+    expect(taskBody.task.status).toBe('review')
+    expect(taskBody.task.claim_state).toBe('Claimed')
+
+    const reviewsRes = await request.get(`/api/quality-review?taskId=${taskId}`, {
+      headers: API_KEY_HEADER,
+    })
+    expect(reviewsRes.status()).toBe(200)
+    const reviewsBody = await reviewsRes.json()
+    expect(reviewsBody.reviews).toHaveLength(0)
+  })
+
+  test('POST treats in_progress quality review as wait without writing rejection', async ({ request }) => {
+    const { id: taskId } = await createTestTask(request, { status: 'review' })
+    cleanup.push(taskId)
+
+    const res = await request.post('/api/quality-review', {
+      headers: API_KEY_HEADER,
+      data: {
+        taskId,
+        reviewer: 'aegis',
+        status: 'in_progress',
+        notes: 'Agent still working',
+      },
+    })
+
+    expect(res.status()).toBe(200)
+    const body = await res.json()
+    expect(body.success).toBe(true)
+    expect(body.wait).toBe(true)
+    expect(body.reason).toBe('in_progress')
+
+    const reviewsRes = await request.get(`/api/quality-review?taskId=${taskId}`, {
+      headers: API_KEY_HEADER,
+    })
+    const reviewsBody = await reviewsRes.json()
+    expect(reviewsBody.reviews).toHaveLength(0)
+  })
+
   test('POST rejects missing required fields', async ({ request }) => {
     const { id: taskId } = await createTestTask(request)
     cleanup.push(taskId)

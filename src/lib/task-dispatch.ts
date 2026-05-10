@@ -5,6 +5,7 @@ import { eventBus } from './event-bus'
 import { logger } from './logger'
 import { config } from './config'
 import { syncTaskOutbound } from './github-sync-engine'
+import { isActiveClaim } from './claim-time'
 
 /** Sync task to GitHub/GNAP and broadcast escalation if task failed */
 function syncAndEscalateIfFailed(task: { id: number; title: string; status: string; priority: string; project_id?: number | null; workspace_id: number; description?: string | null }, newStatus: string, errorMsg?: string, dispatchAttempts?: number): void {
@@ -306,6 +307,8 @@ interface ReviewableTask {
   project_id: number | null
   ticket_prefix: string | null
   project_ticket_no: number | null
+  claim_state: string | null
+  claimed_at: string | number | null
 }
 
 function resolveGatewayAgentIdForReview(task: ReviewableTask): string {
@@ -356,11 +359,15 @@ function buildReviewPrompt(task: ReviewableTask): string {
   return lines.join('\n')
 }
 
-function parseReviewVerdict(text: string): { status: 'approved' | 'rejected'; notes: string } {
+function parseReviewVerdict(text: string): { status: 'approved' | 'rejected' | 'in_progress'; notes: string } {
   const upper = text.toUpperCase()
-  const status = upper.includes('VERDICT: APPROVED') ? 'approved' as const : 'rejected' as const
+  const status = upper.includes('VERDICT: APPROVED')
+    ? 'approved' as const
+    : upper.includes('VERDICT: IN_PROGRESS') || upper.includes('VERDICT: IN PROGRESS') || upper.includes('STATUS: IN_PROGRESS')
+      ? 'in_progress' as const
+      : 'rejected' as const
   const notesMatch = text.match(/NOTES:\s*(.+)/i)
-  const notes = notesMatch?.[1]?.trim().substring(0, 2000) || (status === 'approved' ? 'Quality check passed' : 'Quality check failed')
+  const notes = notesMatch?.[1]?.trim().substring(0, 2000) || (status === 'approved' ? 'Quality check passed' : status === 'in_progress' ? 'Agent still in progress' : 'Quality check failed')
   return { status, notes }
 }
 
@@ -373,6 +380,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
   const tasks = db.prepare(`
     SELECT t.id, t.title, t.description, t.status, t.priority, t.resolution, t.assigned_to, t.workspace_id,
+           t.claim_state, t.claimed_at,
            t.project_id, p.ticket_prefix, t.project_ticket_no, a.config as agent_config
     FROM tasks t
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
@@ -439,6 +447,45 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       }
 
       const verdict = parseReviewVerdict(agentResponse.text)
+
+      if (verdict.status === 'in_progress') {
+        const now = Math.floor(Date.now() / 1000)
+        db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
+          .run('review', now, task.id)
+        eventBus.broadcast('task.status_changed', {
+          id: task.id,
+          status: 'review',
+          previous_status: 'quality_review',
+          updated_at: now,
+          reason: 'aegis_in_progress_wait',
+        })
+        results.push({ id: task.id, verdict: 'in_progress' })
+        logger.info({ taskId: task.id }, 'Aegis review deferred: reviewer reported in_progress')
+        continue
+      }
+
+      if (verdict.status === 'rejected') {
+        const { active, claimAgeMs } = isActiveClaim(task.claim_state, task.claimed_at)
+        if (active) {
+          const now = Math.floor(Date.now() / 1000)
+          db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
+            .run('review', now, task.id)
+          eventBus.broadcast('task.status_changed', {
+            id: task.id,
+            status: 'review',
+            previous_status: 'quality_review',
+            updated_at: now,
+            reason: 'agent_active',
+            claim_age_ms: claimAgeMs,
+          })
+          results.push({ id: task.id, verdict: 'deferred' })
+          logger.info(
+            { taskId: task.id, claim_age_ms: claimAgeMs },
+            'Aegis rejection deferred: assigned agent claim is still active',
+          )
+          continue
+        }
+      }
 
       // Insert quality review record
       db.prepare(`

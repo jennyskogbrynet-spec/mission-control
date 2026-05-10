@@ -1443,7 +1443,7 @@ const migrations: Migration[] = [
       if (!hasCol('claim_state'))
         db.exec(`ALTER TABLE tasks ADD COLUMN claim_state TEXT NOT NULL DEFAULT 'Unclaimed'`)
       if (!hasCol('claimed_by')) db.exec(`ALTER TABLE tasks ADD COLUMN claimed_by TEXT`)
-      if (!hasCol('claimed_at')) db.exec(`ALTER TABLE tasks ADD COLUMN claimed_at INTEGER`)
+      if (!hasCol('claimed_at')) db.exec(`ALTER TABLE tasks ADD COLUMN claimed_at TEXT`)
 
       db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_claim_state ON tasks(claim_state)`)
       db.exec(

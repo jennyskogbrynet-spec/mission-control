@@ -23,7 +23,8 @@ test.describe('Task Claim API', () => {
     const body = await res.json()
     expect(body.task.claim_state).toBe('Claimed')
     expect(body.task.claimed_by).toBe('reidar')
-    expect(body.task.claimed_at).toBeGreaterThan(0)
+    expect(body.task.claimed_at).toMatch(/^\d{4}-\d{2}-\d{2}T.*\.\d{3}Z$/)
+    expect(Number.isNaN(Date.parse(body.task.claimed_at))).toBe(false)
     expect(body.claimed_by).toBe('reidar')
   })
 

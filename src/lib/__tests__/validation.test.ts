@@ -208,6 +208,15 @@ describe('qualityReviewSchema', () => {
     expect(result.success).toBe(true)
   })
 
+  it('accepts in_progress as a wait verdict', () => {
+    const result = qualityReviewSchema.safeParse({
+      taskId: 1,
+      status: 'in_progress',
+      notes: 'Agent is still working',
+    })
+    expect(result.success).toBe(true)
+  })
+
   it('rejects invalid status', () => {
     const result = qualityReviewSchema.safeParse({
       taskId: 1,

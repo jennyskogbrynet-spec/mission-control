@@ -23,7 +23,7 @@ function mapTaskRow(task: any): Task & { tags: string[]; metadata: Record<string
  * POST /api/tasks/[id]/claim
  *
  * Atomic claim of an Unclaimed ticket via BEGIN IMMEDIATE transaction.
- * Sets claim_state='Claimed', claimed_by=<agent>, claimed_at=now.
+ * Sets claim_state='Claimed', claimed_by=<agent>, claimed_at=UTC ISO timestamp.
  *
  * Body: { "agent": "<agent_id>" }   — required
  *
@@ -60,6 +60,7 @@ export async function POST(
     }
 
     const now = Math.floor(Date.now() / 1000)
+    const claimedAt = new Date().toISOString()
 
     // Atomic claim: only Unclaimed tasks transition. better-sqlite3 transactions
     // are IMMEDIATE by default for write statements, preventing dual-claim races.
@@ -72,7 +73,7 @@ export async function POST(
           WHERE id = ? AND workspace_id = ? AND claim_state = 'Unclaimed'
           `,
         )
-        .run(agent, now, now, taskId, workspaceId).changes
+        .run(agent, claimedAt, now, taskId, workspaceId).changes
     })
 
     const changedRows = claim()
