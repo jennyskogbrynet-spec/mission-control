@@ -481,7 +481,33 @@ interface ReviewableTask {
   project_ticket_no: number | null
   claim_state: string | null
   claimed_at: string | number | null
+  claimed_by: string | null
   updated_at: number | null
+}
+
+/**
+ * Identities that did (or claimed) the work on a task, normalized for
+ * comparison against a candidate reviewer agent ID. Used to enforce
+ * separation of duties in the automated Aegis path.
+ */
+export function collectImplementerAgentIds(
+  task: Pick<ReviewableTask, 'assigned_to' | 'claimed_by' | 'agent_config'>,
+): Set<string> {
+  const ids = new Set<string>()
+  for (const value of [task.assigned_to, task.claimed_by]) {
+    const normalized = normalizeGatewayAgentId(value)
+    if (normalized) ids.add(normalized)
+  }
+  if (task.agent_config) {
+    try {
+      const cfg = JSON.parse(task.agent_config)
+      if (typeof cfg.openclawId === 'string') {
+        const normalized = normalizeGatewayAgentId(cfg.openclawId)
+        if (normalized) ids.add(normalized)
+      }
+    } catch { /* ignore */ }
+  }
+  return ids
 }
 
 export function resolveGatewayAgentIdForReview(
@@ -599,7 +625,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
   const tasks = db.prepare(`
     SELECT t.id, t.title, t.description, t.status, t.priority, t.resolution, t.assigned_to, t.workspace_id,
-           t.claim_state, t.claimed_at, t.updated_at,
+           t.claim_state, t.claimed_at, t.claimed_by, t.updated_at,
            t.project_id, p.ticket_prefix, t.project_ticket_no, a.config as agent_config
     FROM tasks t
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
@@ -630,8 +656,24 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       const prompt = buildReviewPrompt(task)
       let agentResponse: AgentResponseParsed
 
-      if (!isGatewayAvailable() && getAnthropicApiKey()) {
-        // Direct Claude API review — no gateway needed
+      // Separation of duties (server-side): the agent that did or claimed the
+      // work must never review it. Prefer an independent gateway reviewer,
+      // fall back to a direct Claude API review, and with neither available
+      // park the task for the owner instead of letting it self-approve.
+      const implementerIds = collectImplementerAgentIds(task)
+      let gatewayReviewAgent: string | null = null
+      if (isGatewayAvailable()) {
+        const reviewFallbackAgentId = getConfiguredReviewFallbackAgentId(db, task.workspace_id)
+        const resolved = resolveGatewayAgentIdForReview(task, reviewFallbackAgentId)
+        if (!implementerIds.has(normalizeGatewayAgentId(resolved))) {
+          gatewayReviewAgent = resolved
+        } else if (reviewFallbackAgentId && !implementerIds.has(normalizeGatewayAgentId(reviewFallbackAgentId))) {
+          gatewayReviewAgent = reviewFallbackAgentId
+        }
+      }
+
+      if (!gatewayReviewAgent && getAnthropicApiKey()) {
+        // Direct Claude API review — independent of the implementing agent
         const reviewTask: DispatchableTask = {
           id: task.id, title: task.title, description: task.description,
           status: 'quality_review', priority: 'high', assigned_to: 'aegis',
@@ -640,14 +682,31 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
           project_ticket_no: task.project_ticket_no, project_id: null,
         }
         agentResponse = await callClaudeDirectly(reviewTask, prompt)
+      } else if (!gatewayReviewAgent) {
+        // No independent reviewer available — park for owner triage rather
+        // than routing the review to the implementer.
+        const now = Math.floor(Date.now() / 1000)
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, updated_at = ? WHERE id = ?')
+          .run(
+            'awaiting_owner',
+            'Aegis separation of duties: no independent reviewer available (review routing resolved to the implementing agent and no direct API key is configured).',
+            now,
+            task.id,
+          )
+        eventBus.broadcast('task.status_changed', {
+          id: task.id,
+          status: 'awaiting_owner',
+          previous_status: 'quality_review',
+          updated_at: now,
+          reason: 'aegis_no_independent_reviewer',
+        })
+        results.push({ id: task.id, verdict: 'deferred', error: 'no independent reviewer' })
+        logger.warn({ taskId: task.id }, 'Aegis review parked: no independent reviewer available')
+        continue
       } else {
-        // Resolve the gateway agent ID from config, falling back to assigned_to or default
-        const reviewFallbackAgentId = getConfiguredReviewFallbackAgentId(db, task.workspace_id)
-        const reviewAgent = resolveGatewayAgentIdForReview(task, reviewFallbackAgentId)
-
         const invokeParams = {
           message: prompt,
-          agentId: reviewAgent,
+          agentId: gatewayReviewAgent,
           // Stable per task revision so gateway-side dedupe absorbs re-sends of
           // the same review; a new revision (updated_at change) mints a new key.
           idempotencyKey: `aegis-review-${task.id}-${task.updated_at ?? 0}`,
@@ -716,8 +775,9 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       `).run(task.id, verdict.status, verdict.notes, task.workspace_id)
 
       if (verdict.status === 'approved') {
-        db.prepare(`UPDATE tasks SET status = ?, updated_at = ?, ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
-          .run('done', Math.floor(Date.now() / 1000), task.id)
+        const doneAt = Math.floor(Date.now() / 1000)
+        db.prepare(`UPDATE tasks SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?), ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
+          .run('done', doneAt, doneAt, task.id)
 
         eventBus.broadcast('task.status_changed', {
           id: task.id,

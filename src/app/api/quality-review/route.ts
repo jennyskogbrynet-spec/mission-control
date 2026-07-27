@@ -169,8 +169,17 @@ export async function POST(request: NextRequest) {
       // Set completed_at on the done-transition, mirroring the direct PUT path
       // (PUT /api/tasks/[id] sets completed_at when a task first reaches 'done').
       // COALESCE keeps any existing timestamp so re-approvals stay idempotent.
-      db.prepare('UPDATE tasks SET status = ?, completed_at = COALESCE(completed_at, unixepoch()), updated_at = unixepoch() WHERE id = ? AND workspace_id = ?')
-        .run('done', taskId, workspaceId)
+      // Terminal transition must also release an active claim atomically.
+      db.prepare(`
+        UPDATE tasks SET
+          status = ?,
+          completed_at = COALESCE(completed_at, unixepoch()),
+          updated_at = unixepoch(),
+          claim_state = CASE WHEN claim_state IN ('Claimed', 'Running') THEN 'Released' ELSE claim_state END,
+          claimed_by = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_by END,
+          claimed_at = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_at END
+        WHERE id = ? AND workspace_id = ?
+      `).run('done', taskId, workspaceId)
       eventBus.broadcast('task.status_changed', {
         id: taskId,
         status: 'done',

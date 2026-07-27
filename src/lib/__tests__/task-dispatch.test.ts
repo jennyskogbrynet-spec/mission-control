@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTaskPrompt, classifyDirectModel, pickDispatchIdempotencyKey, resolveDispatchFailureStatus, resolveDispatchResourcePolicy, resolveGatewayAgentIdForReview, resolveTaskDispatchModelOverride } from '@/lib/task-dispatch'
+import { buildTaskPrompt, classifyDirectModel, collectImplementerAgentIds, pickDispatchIdempotencyKey, resolveDispatchFailureStatus, resolveDispatchResourcePolicy, resolveGatewayAgentIdForReview, resolveTaskDispatchModelOverride } from '@/lib/task-dispatch'
 
 describe('resolveTaskDispatchModelOverride', () => {
   it('returns null when the agent has no explicit dispatch model override', () => {
@@ -234,5 +234,33 @@ describe('pickDispatchIdempotencyKey', () => {
     const meta = { dispatch_idempotency_key: 123 as unknown }
     const result = pickDispatchIdempotencyKey(meta as Record<string, unknown>, 7, () => 'uuid-3')
     expect(result.minted).toBe(true)
+  })
+})
+
+describe('collectImplementerAgentIds (Aegis separation of duties)', () => {
+  it('collects assigned_to, claimed_by and agent_config openclawId, normalized', () => {
+    const ids = collectImplementerAgentIds({
+      assigned_to: 'Reidar',
+      claimed_by: 'reidar-worker',
+      agent_config: '{"openclawId":"Reidar Sub Agent"}',
+    })
+    expect(ids).toEqual(new Set(['reidar', 'reidar-worker', 'reidar-sub-agent']))
+  })
+
+  it('flags the resolved review agent when routing would self-review', () => {
+    const task = { assigned_to: 'reidar', claimed_by: null, agent_config: '{"openclawId":"reidar"}' }
+    const ids = collectImplementerAgentIds(task)
+    const resolved = resolveGatewayAgentIdForReview(task, 'aegis')
+    expect(ids.has(resolved.toLowerCase())).toBe(true)
+  })
+
+  it('accepts an independent fallback reviewer', () => {
+    const ids = collectImplementerAgentIds({ assigned_to: 'reidar', claimed_by: 'reidar', agent_config: null })
+    expect(ids.has('aegis')).toBe(false)
+  })
+
+  it('ignores empty and malformed identities', () => {
+    const ids = collectImplementerAgentIds({ assigned_to: '  ', claimed_by: null, agent_config: '{not json' })
+    expect(ids.size).toBe(0)
   })
 })
