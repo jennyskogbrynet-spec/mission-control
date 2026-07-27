@@ -6,6 +6,9 @@ async function loadConfigWithEnv(env: Record<string, string | undefined>) {
   vi.resetModules()
 
   const original = {
+    OPENCLAW_BIN: process.env.OPENCLAW_BIN,
+    CLAWDBOT_BIN: process.env.CLAWDBOT_BIN,
+    PATH: process.env.PATH,
     MISSION_CONTROL_DATA_DIR: process.env.MISSION_CONTROL_DATA_DIR,
     MISSION_CONTROL_BUILD_DATA_DIR: process.env.MISSION_CONTROL_BUILD_DATA_DIR,
     MISSION_CONTROL_BUILD_DB_PATH: process.env.MISSION_CONTROL_BUILD_DB_PATH,
@@ -24,6 +27,15 @@ async function loadConfigWithEnv(env: Record<string, string | undefined>) {
   }
 
   const mod = await import('./config')
+
+  if (original.OPENCLAW_BIN === undefined) delete process.env.OPENCLAW_BIN
+  else process.env.OPENCLAW_BIN = original.OPENCLAW_BIN
+
+  if (original.CLAWDBOT_BIN === undefined) delete process.env.CLAWDBOT_BIN
+  else process.env.CLAWDBOT_BIN = original.CLAWDBOT_BIN
+
+  if (original.PATH === undefined) delete process.env.PATH
+  else process.env.PATH = original.PATH
 
   if (original.MISSION_CONTROL_DATA_DIR === undefined) delete process.env.MISSION_CONTROL_DATA_DIR
   else process.env.MISSION_CONTROL_DATA_DIR = original.MISSION_CONTROL_DATA_DIR
@@ -52,6 +64,7 @@ async function loadConfigWithEnv(env: Record<string, string | undefined>) {
 describe('config data paths', () => {
   beforeEach(() => {
     vi.resetModules()
+    vi.unmock('node:fs')
   })
 
   it('derives db and token paths from MISSION_CONTROL_DATA_DIR', async () => {
@@ -106,5 +119,43 @@ describe('config data paths', () => {
     expect(config.dataDir).toMatch(new RegExp(`^${expectedBuildRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/worker-\\d+$`))
     expect(config.dbPath).toBe('/tmp/build.db')
     expect(config.tokensPath).toBe('/tmp/build-tokens.json')
+  })
+
+  it('uses the absolute Homebrew OpenClaw path when no explicit binary override is set', async () => {
+    const config = await loadConfigWithEnv({
+      OPENCLAW_BIN: undefined,
+      CLAWDBOT_BIN: undefined,
+    })
+
+    expect(config.openclawBin).toBe('/opt/homebrew/bin/openclaw')
+  })
+
+  it('falls back to PATH lookup when standard absolute binary paths are absent', async () => {
+    vi.doMock('node:fs', async () => {
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+      const existsSync = (candidate: string) => candidate === '/tmp/mc-bin/openclaw'
+      return {
+        ...actual,
+        existsSync,
+        default: { ...(actual as any), existsSync },
+      }
+    })
+
+    const config = await loadConfigWithEnv({
+      OPENCLAW_BIN: undefined,
+      PATH: '/tmp/mc-bin',
+    })
+
+    expect(config.openclawBin).toBe('/tmp/mc-bin/openclaw')
+  })
+
+  it('respects explicit OpenClaw binary overrides', async () => {
+    const config = await loadConfigWithEnv({
+      OPENCLAW_BIN: '/custom/bin/openclaw',
+      CLAWDBOT_BIN: '/custom/bin/clawdbot',
+    })
+
+    expect(config.openclawBin).toBe('/custom/bin/openclaw')
+    expect(config.clawdbotBin).toBe('/custom/bin/clawdbot')
   })
 })

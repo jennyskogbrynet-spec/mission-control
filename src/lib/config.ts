@@ -8,6 +8,26 @@ function clampInt(value: number, min: number, max: number, fallback: number): nu
   return Math.max(min, Math.min(max, Math.floor(value)))
 }
 
+function resolveExecutable(name: string, candidates: string[]): string {
+  const explicit = process.env[name]
+  if (explicit && explicit.trim()) return explicit.trim()
+
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate) && fs.existsSync(candidate)) return candidate
+  }
+
+  const searchPath = (process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate)) continue
+    for (const dir of searchPath) {
+      const resolved = path.join(dir, candidate)
+      if (fs.existsSync(resolved)) return resolved
+    }
+  }
+
+  return candidates.find((candidate) => !path.isAbsolute(candidate)) || candidates[0] || ''
+}
+
 const isBuildPhase = process.env.NEXT_PHASE === 'phase-production-build'
 const defaultDataDir = path.join(process.cwd(), '.data')
 const configuredDataDir = process.env.MISSION_CONTROL_DATA_DIR || defaultDataDir
@@ -77,8 +97,16 @@ export const config = {
   openclawHome: openclawStateDir,
   openclawStateDir,
   openclawConfigPath,
-  openclawBin: process.env.OPENCLAW_BIN || 'openclaw',
-  clawdbotBin: process.env.CLAWDBOT_BIN || 'clawdbot',
+  openclawBin: resolveExecutable('OPENCLAW_BIN', [
+    '/opt/homebrew/bin/openclaw',
+    '/usr/local/bin/openclaw',
+    'openclaw',
+  ]),
+  clawdbotBin: resolveExecutable('CLAWDBOT_BIN', [
+    '/opt/homebrew/bin/clawdbot',
+    '/usr/local/bin/clawdbot',
+    'clawdbot',
+  ]),
   gatewayHost: process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1',
   gatewayPort: clampInt(Number(process.env.OPENCLAW_GATEWAY_PORT || '18789'), 1, 65535, 18789),
   logsDir:

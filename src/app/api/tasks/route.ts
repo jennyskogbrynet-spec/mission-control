@@ -10,17 +10,50 @@ import { normalizeTaskCreateStatus } from '@/lib/task-status';
 import { pushTaskToGitHub, syncTaskOutbound } from '@/lib/github-sync-engine';
 import { pushTaskToGnap } from '@/lib/gnap-sync';
 import { config } from '@/lib/config';
+import { normalizeTaskMetadata } from '@/lib/mc-agentic-os';
 
 function formatTicketRef(prefix?: string | null, num?: number | null): string | undefined {
   if (!prefix || typeof num !== 'number' || !Number.isFinite(num) || num <= 0) return undefined
   return `${prefix}-${String(num).padStart(3, '0')}`
 }
 
+function parseTaskTags(raw: unknown): string[] {
+  if (raw == null || raw === '') return []
+  if (Array.isArray(raw)) return raw.filter((tag): tag is string => typeof tag === 'string')
+
+  const text = String(raw).trim()
+  if (!text) return []
+
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) return parsed.filter((tag): tag is string => typeof tag === 'string')
+  } catch {
+    // Legacy rows sometimes contain comma-separated tags instead of JSON.
+  }
+
+  return text
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+function parseTaskMetadata(raw: unknown): Record<string, unknown> {
+  if (raw == null || raw === '') return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+
+  try {
+    const parsed = JSON.parse(String(raw))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function mapTaskRow(task: any): Task & { tags: string[]; metadata: Record<string, unknown> } {
   return {
     ...task,
-    tags: task.tags ? JSON.parse(task.tags) : [],
-    metadata: task.metadata ? JSON.parse(task.metadata) : {},
+    tags: parseTaskTags(task.tags),
+    metadata: parseTaskMetadata(task.metadata),
     ticket_ref: formatTicketRef(task.project_prefix, task.project_ticket_no),
   }
 }
@@ -56,6 +89,10 @@ function hasAegisApproval(db: ReturnType<typeof getDatabase>, taskId: number, wo
     LIMIT 1
   `).get(taskId, workspaceId) as { status?: string } | undefined
   return review?.status === 'approved'
+}
+
+function isTerminalTaskStatus(status: string): boolean {
+  return ['done', 'failed', 'wontfix'].includes(status)
 }
 
 /**
@@ -201,6 +238,14 @@ export async function POST(request: NextRequest) {
     }
 
     const resolvedCompletedAt = completed_at ?? (normalizedStatus === 'done' ? now : null)
+    const normalizedMetadata = normalizeTaskMetadata(metadata, {
+      title,
+      description,
+      assigned_to,
+      priority,
+      status: normalizedStatus,
+      tags,
+    })
 
     const createTaskTx = db.transaction(() => {
       db.prepare(`
@@ -245,7 +290,7 @@ export async function POST(request: NextRequest) {
         retry_count,
         resolvedCompletedAt,
         JSON.stringify(tags),
-        JSON.stringify(metadata),
+        JSON.stringify(normalizedMetadata),
         workspaceId
       )
       return Number(dbResult.lastInsertRowid)
@@ -357,9 +402,23 @@ export async function PUT(request: NextRequest) {
       SET status = ?, updated_at = ?
       WHERE id = ? AND workspace_id = ?
     `);
+    const updateTerminalStmt = db.prepare(`
+      UPDATE tasks
+      SET status = ?,
+          updated_at = ?,
+          claim_state = CASE WHEN claim_state IN ('Claimed', 'Running') THEN 'Released' ELSE claim_state END,
+          claimed_by = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_by END,
+          claimed_at = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_at END
+      WHERE id = ? AND workspace_id = ?
+    `);
     const updateDoneStmt = db.prepare(`
       UPDATE tasks
-      SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
+      SET status = ?,
+          updated_at = ?,
+          completed_at = COALESCE(completed_at, ?),
+          claim_state = CASE WHEN claim_state IN ('Claimed', 'Running') THEN 'Released' ELSE claim_state END,
+          claimed_by = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_by END,
+          claimed_at = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_at END
       WHERE id = ? AND workspace_id = ?
     `);
 
@@ -376,6 +435,8 @@ export async function PUT(request: NextRequest) {
 
         if (task.status === 'done') {
           updateDoneStmt.run(task.status, now, now, task.id, workspaceId);
+        } else if (isTerminalTaskStatus(task.status)) {
+          updateTerminalStmt.run(task.status, now, task.id, workspaceId);
         } else {
           updateStmt.run(task.status, now, task.id, workspaceId);
         }

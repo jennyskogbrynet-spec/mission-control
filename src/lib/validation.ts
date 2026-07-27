@@ -26,9 +26,51 @@ export async function validateBody<T>(
   }
 }
 
+const workflowContractSchema = z.object({
+  workflow_template: z.enum(['research_to_prd', 'code_fix', 'qa_review', 'content_pipeline', 'mc_closure', 'generic_agent_run']).optional(),
+  goal: z.string().min(1).max(1000).optional(),
+  owner_agent: z.string().min(1).max(100).nullable().optional(),
+  required_skills: z.array(z.string().min(1).max(100)).max(50).optional(),
+  context_pack_sources: z.array(z.string().min(1).max(200)).max(50).optional(),
+  self_layer_sources: z.array(z.string().min(1).max(200)).max(50).optional(),
+  memory_tools: z.array(z.string().min(1).max(100)).max(50).optional(),
+  memory_context_types: z.object({
+    episodic: z.array(z.string().min(1).max(200)).max(50).optional(),
+    semantic: z.array(z.string().min(1).max(200)).max(50).optional(),
+    procedural: z.array(z.string().min(1).max(200)).max(50).optional(),
+  }).catchall(z.unknown()).optional(),
+  allowed_tools: z.array(z.string().min(1).max(100)).max(100).optional(),
+  capability_scopes: z.record(z.string(), z.unknown()).optional(),
+  resource_policy: z.object({
+    lane: z.string().min(1).max(100).optional(),
+    run_timeout_seconds: z.number().int().min(30).max(7200).optional(),
+    max_retries: z.number().int().min(0).max(10).optional(),
+    stale_after_minutes: z.number().int().min(1).max(1440).optional(),
+    rate_limit_key: z.string().min(1).max(100).nullable().optional(),
+    zombie_reaper: z.boolean().optional(),
+  }).catchall(z.unknown()).optional(),
+  tool_permissions: z.record(z.string(), z.unknown()).optional(),
+  autonomy_level: z.enum(['auto', 'soft_approval', 'hard_approval']).optional(),
+  verify_required: z.boolean().optional(),
+  proof_expected: z.string().min(1).max(1000).optional(),
+  output_location: z.string().min(1).max(500).nullable().optional(),
+}).catchall(z.unknown())
+
+const agenticOsSchema = z.object({
+  ontology: z.string().min(1).max(500).optional(),
+  evidence: z.array(z.unknown()).max(200).optional(),
+  decisions: z.array(z.unknown()).max(200).optional(),
+  learnings: z.array(z.unknown()).max(200).optional(),
+  action_log: z.array(z.unknown()).max(1000).optional(),
+  evals: z.array(z.unknown()).max(200).optional(),
+}).catchall(z.unknown())
+
 const taskMetadataSchema = z.object({
   implementation_repo: z.string().min(1, 'implementation_repo cannot be empty').max(200).optional(),
   code_location: z.string().min(1, 'code_location cannot be empty').max(500).optional(),
+  workflow_contract: workflowContractSchema.optional(),
+  context_pack: z.record(z.string(), z.unknown()).optional(),
+  agentic_os: agenticOsSchema.optional(),
 }).catchall(z.unknown())
 
 export const createTaskSchema = z.object({
@@ -53,7 +95,27 @@ export const createTaskSchema = z.object({
   metadata: taskMetadataSchema.default({} as Record<string, unknown>),
 })
 
-export const updateTaskSchema = createTaskSchema.partial()
+export const updateTaskSchema = z.object({
+  title: z.string().min(1, 'Title is required').max(500).optional(),
+  description: z.string().max(5000).optional(),
+  status: z.enum(['backlog', 'inbox', 'assigned', 'awaiting_owner', 'in_progress', 'review', 'quality_review', 'done', 'failed']).optional(),
+  priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
+  project_id: z.number().int().positive().optional(),
+  assigned_to: z.string().max(100).optional(),
+  created_by: z.string().max(100).optional(),
+  due_date: z.number().int().min(0).max(4102444800).optional(),
+  estimated_hours: z.number().min(0).max(10000).optional(),
+  actual_hours: z.number().min(0).max(10000).optional(),
+  outcome: z.enum(['success', 'failed', 'partial', 'abandoned']).optional(),
+  error_message: z.string().max(5000).optional(),
+  resolution: z.string().max(5000).optional(),
+  feedback_rating: z.number().int().min(1).max(5).optional(),
+  feedback_notes: z.string().max(5000).optional(),
+  retry_count: z.number().int().min(0).optional(),
+  completed_at: z.number().int().min(0).max(4102444800).optional(),
+  tags: z.array(z.string().min(1).max(100)).max(50).optional(),
+  metadata: taskMetadataSchema.optional(),
+})
 
 export const createAgentSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100),

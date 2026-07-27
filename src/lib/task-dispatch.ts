@@ -7,6 +7,22 @@ import { config } from './config'
 import { syncTaskOutbound } from './github-sync-engine'
 import { isActiveClaim } from './claim-time'
 
+/** Timeout for gateway task dispatch CLI calls. Configurable via MC_GATEWAY_TASK_DISPATCH_TIMEOUT_MS env var (default: 600000ms). */
+const TASK_DISPATCH_TIMEOUT_MS = parseInt(process.env['MC_GATEWAY_TASK_DISPATCH_TIMEOUT_MS'] ?? '600000', 10)
+const RELEASE_ACTIVE_CLAIM_ASSIGNMENTS = `
+  claim_state = CASE WHEN claim_state IN ('Claimed', 'Running') THEN 'Released' ELSE claim_state END,
+  claimed_by = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_by END,
+  claimed_at = CASE WHEN claim_state IN ('Claimed', 'Running') THEN NULL ELSE claimed_at END
+`
+const DEFAULT_DISPATCH_RESOURCE_POLICY = {
+  lane: 'default',
+  timeoutMs: TASK_DISPATCH_TIMEOUT_MS,
+  maxRetries: 5,
+  staleAfterMinutes: 10,
+  rateLimitKey: null as string | null,
+  zombieReaper: true,
+}
+
 /** Sync task to GitHub/GNAP and broadcast escalation if task failed */
 function syncAndEscalateIfFailed(task: { id: number; title: string; status: string; priority: string; project_id?: number | null; workspace_id: number; description?: string | null }, newStatus: string, errorMsg?: string, dispatchAttempts?: number): void {
   syncTaskOutbound({ ...task, status: newStatus }, task.workspace_id)
@@ -37,6 +53,7 @@ interface DispatchableTask {
   project_ticket_no: number | null
   project_id: number | null
   tags?: string[]
+  metadata?: string | Record<string, unknown> | null
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +89,105 @@ function resolveGatewayAgentId(task: DispatchableTask): string {
   return task.agent_name
 }
 
-function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null): string {
+function parseTaskMetadata(raw: DispatchableTask['metadata']): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw
+  try {
+    const parsed = JSON.parse(String(raw))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const integer = Math.trunc(value)
+  if (integer < min || integer > max) return fallback
+  return integer
+}
+
+export function resolveDispatchResourcePolicy(rawMetadata: DispatchableTask['metadata']): typeof DEFAULT_DISPATCH_RESOURCE_POLICY {
+  const metadata = parseTaskMetadata(rawMetadata)
+  const contract = asRecord(metadata.workflow_contract)
+  const resourcePolicy = asRecord(contract.resource_policy)
+  const timeoutSeconds = boundedInteger(resourcePolicy.run_timeout_seconds, Math.floor(TASK_DISPATCH_TIMEOUT_MS / 1000), 30, 7200)
+
+  return {
+    lane: typeof resourcePolicy.lane === 'string' && resourcePolicy.lane.trim()
+      ? resourcePolicy.lane.trim()
+      : DEFAULT_DISPATCH_RESOURCE_POLICY.lane,
+    timeoutMs: timeoutSeconds * 1000,
+    maxRetries: boundedInteger(resourcePolicy.max_retries, DEFAULT_DISPATCH_RESOURCE_POLICY.maxRetries, 0, 10),
+    staleAfterMinutes: boundedInteger(resourcePolicy.stale_after_minutes, DEFAULT_DISPATCH_RESOURCE_POLICY.staleAfterMinutes, 1, 1440),
+    rateLimitKey: typeof resourcePolicy.rate_limit_key === 'string' && resourcePolicy.rate_limit_key.trim()
+      ? resourcePolicy.rate_limit_key.trim()
+      : null,
+    zombieReaper: typeof resourcePolicy.zombie_reaper === 'boolean'
+      ? resourcePolicy.zombie_reaper
+      : DEFAULT_DISPATCH_RESOURCE_POLICY.zombieReaper,
+  }
+}
+
+export function resolveDispatchFailureStatus(
+  currentAttempts: number,
+  resourcePolicy: Pick<typeof DEFAULT_DISPATCH_RESOURCE_POLICY, 'maxRetries'>,
+): { newAttempts: number; terminal: boolean } {
+  const newAttempts = Math.max(0, Math.trunc(currentAttempts || 0)) + 1
+  return {
+    newAttempts,
+    terminal: newAttempts >= resourcePolicy.maxRetries,
+  }
+}
+
+function formatJsonish(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'object') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function formatWorkflowContract(metadata: Record<string, unknown>): string[] {
+  const contract = metadata.workflow_contract
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract)) return []
+  const c = contract as Record<string, unknown>
+  const lines = ['', '## Mission Control Workflow Contract']
+  const fields: Array<[string, unknown]> = [
+    ['Workflow template', c.workflow_template],
+    ['Goal', c.goal],
+    ['Owner agent', c.owner_agent],
+    ['Autonomy level', c.autonomy_level],
+    ['Required skills', Array.isArray(c.required_skills) ? c.required_skills.join(', ') : c.required_skills],
+    ['Allowed tools', Array.isArray(c.allowed_tools) ? c.allowed_tools.join(', ') : c.allowed_tools],
+    ['Context sources', Array.isArray(c.context_pack_sources) ? c.context_pack_sources.join(', ') : c.context_pack_sources],
+    ['Self layer sources', Array.isArray(c.self_layer_sources) ? c.self_layer_sources.join(', ') : c.self_layer_sources],
+    ['Memory tools', Array.isArray(c.memory_tools) ? c.memory_tools.join(', ') : c.memory_tools],
+    ['Memory context types', formatJsonish(c.memory_context_types)],
+    ['Capability scopes', formatJsonish(c.capability_scopes)],
+    ['Resource policy', formatJsonish(c.resource_policy)],
+    ['Verify required', c.verify_required],
+    ['Proof expected', c.proof_expected],
+    ['Output location', c.output_location],
+  ]
+
+  for (const [label, value] of fields) {
+    if (value === undefined || value === null || value === '') continue
+    lines.push(`- ${label}: ${String(value)}`)
+  }
+  lines.push('- Stop rule: if autonomy level or tool permissions hit an approval gate, stop and report instead of proceeding.')
+  return lines
+}
+
+export function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null): string {
   const ticket = task.ticket_prefix && task.project_ticket_no
     ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
     : `TASK-${task.id}`
@@ -91,6 +206,8 @@ function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | nu
   if (task.description) {
     lines.push('', task.description)
   }
+
+  lines.push(...formatWorkflowContract(parseTaskMetadata(task.metadata)))
 
   if (rejectionFeedback) {
     lines.push('', '## Previous Review Feedback', rejectionFeedback, '', 'Please address this feedback in your response.')
@@ -161,7 +278,7 @@ function isGatewayAvailable(): boolean {
   }
 }
 
-function classifyDirectModel(task: DispatchableTask): string {
+export function classifyDirectModel(task: Pick<DispatchableTask, 'id' | 'title' | 'description' | 'priority' | 'agent_config'>): string {
   // Check per-agent config override first
   if (task.agent_config) {
     try {
@@ -194,13 +311,15 @@ function classifyDirectModel(task: DispatchableTask): string {
     if (row?.estimated_hours && row.estimated_hours >= 4) return 'claude-opus-4-6'
   } catch { /* ignore */ }
 
-  // Routine → Haiku
+  // Routine tasks used to fall back to Haiku here, but Haiku is not stable for
+  // delegated Mission Control work. Keep direct fallback on Sonnet unless an
+  // agent explicitly opts into a dispatchModel override above.
   const routineSignals = [
     'status check', 'health check', 'format', 'rename', 'summarize',
     'translate', 'quick ', 'simple ', 'routine ', 'minor ',
   ]
   if (routineSignals.some(s => text.includes(s)) && priority !== 'high' && priority !== 'critical') {
-    return 'claude-haiku-4-5-20251001'
+    return 'claude-sonnet-4-6'
   }
 
   // Default → Sonnet
@@ -222,6 +341,7 @@ function getAgentSoulContent(task: DispatchableTask): string | null {
 async function callClaudeDirectly(
   task: DispatchableTask,
   prompt: string,
+  timeoutMs = TASK_DISPATCH_TIMEOUT_MS,
 ): Promise<AgentResponseParsed> {
   const apiKey = getAnthropicApiKey()
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set — cannot dispatch without gateway')
@@ -245,15 +365,28 @@ async function callClaudeDirectly(
 
   logger.info({ taskId: task.id, model, agent: task.agent_name }, 'Dispatching task via direct Claude API')
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Claude API dispatch timed out after ${timeoutMs}ms`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     const errorBody = await res.text().catch(() => '')
@@ -311,14 +444,60 @@ interface ReviewableTask {
   claimed_at: string | number | null
 }
 
-function resolveGatewayAgentIdForReview(task: ReviewableTask): string {
+export function resolveGatewayAgentIdForReview(
+  task: Pick<ReviewableTask, 'agent_config' | 'assigned_to'>,
+  configuredFallbackAgentId?: string | null,
+): string {
   if (task.agent_config) {
     try {
       const cfg = JSON.parse(task.agent_config)
       if (typeof cfg.openclawId === 'string' && cfg.openclawId) return cfg.openclawId
     } catch { /* ignore */ }
   }
-  return task.assigned_to || 'jarv'
+  return task.assigned_to || configuredFallbackAgentId?.trim() || 'main'
+}
+
+function normalizeGatewayAgentId(value: string | null | undefined): string {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+function getConfiguredReviewFallbackAgentId(
+  db: ReturnType<typeof getDatabase>,
+  workspaceId: number,
+): string | null {
+  const configuredTarget = (
+    db
+      .prepare("SELECT value FROM settings WHERE key = 'chat.coordinator_target_agent'")
+      .get() as { value?: string } | undefined
+  )?.value?.trim()
+
+  if (!configuredTarget) return null
+
+  const wanted = normalizeGatewayAgentId(configuredTarget)
+  const agents = db
+    .prepare('SELECT name, config FROM agents WHERE workspace_id = ?')
+    .all(workspaceId) as Array<{ name: string; config?: string | null }>
+
+  for (const agent of agents) {
+    let openclawId: string | null = null
+    if (agent.config) {
+      try {
+        const cfg = JSON.parse(agent.config)
+        if (typeof cfg.openclawId === 'string' && cfg.openclawId.trim()) {
+          openclawId = cfg.openclawId.trim()
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (
+      normalizeGatewayAgentId(agent.name) === wanted ||
+      normalizeGatewayAgentId(openclawId) === wanted
+    ) {
+      return openclawId || normalizeGatewayAgentId(agent.name)
+    }
+  }
+
+  return configuredTarget
 }
 
 function buildReviewPrompt(task: ReviewableTask): string {
@@ -423,7 +602,8 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
         agentResponse = await callClaudeDirectly(reviewTask, prompt)
       } else {
         // Resolve the gateway agent ID from config, falling back to assigned_to or default
-        const reviewAgent = resolveGatewayAgentIdForReview(task)
+        const reviewFallbackAgentId = getConfiguredReviewFallbackAgentId(db, task.workspace_id)
+        const reviewAgent = resolveGatewayAgentIdForReview(task, reviewFallbackAgentId)
 
         const invokeParams = {
           message: prompt,
@@ -432,8 +612,8 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
           deliver: false,
         }
         const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
+          ['gateway', 'call', 'agent', '--expect-final', '--timeout', String(TASK_DISPATCH_TIMEOUT_MS), '--params', JSON.stringify(invokeParams), '--json'],
+          { timeoutMs: TASK_DISPATCH_TIMEOUT_MS + 5_000 }
         )
         const finalPayload = parseGatewayJson(finalResult.stdout)
           ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
@@ -494,7 +674,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       `).run(task.id, verdict.status, verdict.notes, task.workspace_id)
 
       if (verdict.status === 'approved') {
-        db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
+        db.prepare(`UPDATE tasks SET status = ?, updated_at = ?, ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
           .run('done', Math.floor(Date.now() / 1000), task.id)
 
         eventBus.broadcast('task.status_changed', {
@@ -512,7 +692,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
         if (newAttempts >= maxAegisRetries) {
           // Too many rejections — move to failed
-          db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
+          db.prepare(`UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ?, ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
             .run('failed', `Aegis rejected ${newAttempts} times. Last: ${verdict.notes}`, newAttempts, now, task.id)
 
           eventBus.broadcast('task.status_changed', {
@@ -592,19 +772,20 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 export async function requeueStaleTasks(): Promise<{ ok: boolean; message: string }> {
   const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
-  const staleThreshold = now - 10 * 60 // 10 minutes
-  const maxDispatchRetries = 5
+  const earliestPolicyThreshold = now - 1 * 60
 
   const staleTasks = db.prepare(`
     SELECT t.id, t.title, t.assigned_to, t.dispatch_attempts, t.workspace_id,
+           t.updated_at, t.metadata,
            a.status as agent_status, a.last_seen as agent_last_seen
     FROM tasks t
     LEFT JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
     WHERE t.status = 'in_progress'
       AND t.updated_at < ?
-  `).all(staleThreshold) as Array<{
+  `).all(earliestPolicyThreshold) as Array<{
     id: number; title: string; assigned_to: string | null; dispatch_attempts: number
-    workspace_id: number; agent_status: string | null; agent_last_seen: number | null
+    workspace_id: number; updated_at: number; metadata: string | Record<string, unknown> | null
+    agent_status: string | null; agent_last_seen: number | null
   }>
 
   if (staleTasks.length === 0) {
@@ -615,15 +796,20 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   let failed = 0
 
   for (const task of staleTasks) {
+    const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
+    if (!resourcePolicy.zombieReaper) continue
+    const staleThreshold = now - resourcePolicy.staleAfterMinutes * 60
+    if (Number(task.updated_at ?? 0) >= staleThreshold) continue
+
     // Only requeue if the agent is offline or unknown
     const agentOffline = !task.agent_status || task.agent_status === 'offline'
     if (!agentOffline) continue
 
     const newAttempts = (task.dispatch_attempts ?? 0) + 1
 
-    if (newAttempts >= maxDispatchRetries) {
+    if (newAttempts >= resourcePolicy.maxRetries) {
       db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
-        .run('failed', `Task stuck in_progress ${newAttempts} times — agent "${task.assigned_to}" offline. Moved to failed.`, newAttempts, now, task.id)
+        .run('failed', `Task stuck in_progress ${newAttempts} times in lane "${resourcePolicy.lane}" — agent "${task.assigned_to}" offline. Moved to failed.`, newAttempts, now, task.id)
 
       eventBus.broadcast('task.status_changed', {
         id: task.id,
@@ -637,13 +823,13 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
       failed++
     } else {
       db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
-        .run('assigned', `Requeued: agent "${task.assigned_to}" went offline while task was in_progress`, newAttempts, now, task.id)
+        .run('assigned', `Requeued: agent "${task.assigned_to}" went offline while task was in_progress in lane "${resourcePolicy.lane}"`, newAttempts, now, task.id)
 
       // Add a comment explaining the requeue
       db.prepare(`
         INSERT INTO comments (task_id, author, content, created_at, workspace_id)
         VALUES (?, 'scheduler', ?, ?, ?)
-      `).run(task.id, `Task requeued (attempt ${newAttempts}/${maxDispatchRetries}): agent "${task.assigned_to}" went offline while task was in_progress.`, now, task.workspace_id)
+      `).run(task.id, `Task requeued (attempt ${newAttempts}/${resourcePolicy.maxRetries}, lane ${resourcePolicy.lane}): agent "${task.assigned_to}" went offline while task was in_progress.`, now, task.workspace_id)
 
       eventBus.broadcast('task.status_changed', {
         id: task.id,
@@ -699,6 +885,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
   const now = Math.floor(Date.now() / 1000)
 
   for (const task of tasks) {
+    const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
     // Mark as in_progress immediately to prevent re-dispatch
     db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
       .run('in_progress', now, task.id)
@@ -714,8 +901,14 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       'task',
       task.id,
       'scheduler',
-      `Dispatching task "${task.title}" to agent ${task.agent_name}`,
-      { agent: task.agent_name, priority: task.priority },
+      `Dispatching task "${task.title}" to agent ${task.agent_name} in lane ${resourcePolicy.lane}`,
+      {
+        agent: task.agent_name,
+        priority: task.priority,
+        lane: resourcePolicy.lane,
+        timeoutMs: resourcePolicy.timeoutMs,
+        rateLimitKey: resourcePolicy.rateLimitKey,
+      },
       task.workspace_id
     )
 
@@ -746,7 +939,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       if (useDirectApi && !targetSession) {
         // Direct Claude API dispatch — no gateway needed
-        agentResponse = await callClaudeDirectly(task, prompt)
+        agentResponse = await callClaudeDirectly(task, prompt, resourcePolicy.timeoutMs)
       } else if (targetSession) {
         // Dispatch to a specific existing session via chat.send
         logger.info({ taskId: task.id, targetSession, agent: task.agent_name }, 'Dispatching task to targeted session')
@@ -758,7 +951,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
             idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
             deliver: false,
           },
-          125_000,
+          resourcePolicy.timeoutMs + 5_000,
         )
         const status = String(sendResult?.status || '').toLowerCase()
         if (status !== 'started' && status !== 'ok' && status !== 'in_flight') {
@@ -787,8 +980,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         // response payload (result.payloads[0].text). The two-step agent → agent.wait
         // pattern only returns lifecycle metadata and never includes the agent's text.
         const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
+          ['gateway', 'call', 'agent', '--expect-final', '--timeout', String(resourcePolicy.timeoutMs), '--params', JSON.stringify(invokeParams), '--json'],
+          { timeoutMs: resourcePolicy.timeoutMs + 5_000 }
         )
         const finalPayload = parseGatewayJson(finalResult.stdout)
           ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
@@ -870,12 +1063,11 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       // Increment dispatch_attempts and decide next status
       const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ?').get(task.id) as { dispatch_attempts: number } | undefined)?.dispatch_attempts ?? 0
-      const newAttempts = currentAttempts + 1
-      const maxDispatchRetries = 5
+      const { newAttempts, terminal } = resolveDispatchFailureStatus(currentAttempts, resourcePolicy)
 
-      if (newAttempts >= maxDispatchRetries) {
+      if (terminal) {
         // Too many failures — move to failed
-        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
+        db.prepare(`UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ?, ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
           .run('failed', `Dispatch failed ${newAttempts} times. Last: ${errorMsg.substring(0, 5000)}`, newAttempts, Math.floor(Date.now() / 1000), task.id)
 
         eventBus.broadcast('task.status_changed', {

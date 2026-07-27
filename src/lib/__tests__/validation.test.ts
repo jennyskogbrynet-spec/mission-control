@@ -10,6 +10,7 @@ import {
   createPipelineSchema,
   createWorkflowSchema,
   createMessageSchema,
+  updateTaskSchema,
 } from '@/lib/validation'
 
 describe('createTaskSchema', () => {
@@ -82,6 +83,102 @@ describe('createTaskSchema', () => {
       },
     })
     expect(result.success).toBe(false)
+  })
+
+  it('accepts Agentic OS workflow contract metadata', () => {
+    const result = createTaskSchema.safeParse({
+      title: 'Agentic OS ticket',
+      metadata: {
+        workflow_contract: {
+          workflow_template: 'qa_review',
+          goal: 'Make MC more deterministic',
+          owner_agent: 'Vera',
+          required_skills: ['mission-control'],
+          context_pack_sources: ['task.description', 'vault.memory_search'],
+          self_layer_sources: ['memory/today', 'vault/04-resources/learnings'],
+          memory_tools: ['memory.recall', 'memory.navigate'],
+          memory_context_types: {
+            episodic: ['memory/today'],
+            semantic: ['vault/04-resources/learnings'],
+            procedural: ['skills/mission-control'],
+          },
+          allowed_tools: ['read_files', 'run_tests'],
+          capability_scopes: {
+            run_tests: { read: ['repo'], write: ['test_artifacts'] },
+          },
+          resource_policy: {
+            lane: 'qa',
+            run_timeout_seconds: 1200,
+            max_retries: 1,
+            stale_after_minutes: 60,
+            rate_limit_key: 'qa',
+            zombie_reaper: true,
+          },
+          tool_permissions: { safe_internal_actions: true },
+          autonomy_level: 'soft_approval',
+          verify_required: true,
+          proof_expected: 'test output',
+          output_location: 'vault/04-resources/agent-quality/report.md',
+        },
+        context_pack: { summary: 'Prior context goes here' },
+        agentic_os: {
+          evidence: [],
+          decisions: [],
+          learnings: [],
+          action_log: [],
+          evals: [],
+        },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects invalid workflow autonomy level', () => {
+    const result = createTaskSchema.safeParse({
+      title: 'Bad autonomy',
+      metadata: {
+        workflow_contract: {
+          autonomy_level: 'maybe',
+        },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects invalid workflow template', () => {
+    const result = createTaskSchema.safeParse({
+      title: 'Bad template',
+      metadata: {
+        workflow_contract: {
+          workflow_template: 'youtube_os_magic',
+        },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects invalid resource policy timeout', () => {
+    const result = createTaskSchema.safeParse({
+      title: 'Bad timeout',
+      metadata: {
+        workflow_contract: {
+          resource_policy: {
+            run_timeout_seconds: 5,
+          },
+        },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+})
+
+describe('updateTaskSchema', () => {
+  it('does not apply create defaults on partial updates', () => {
+    const result = updateTaskSchema.safeParse({ outcome: 'success' })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual({ outcome: 'success' })
+    }
   })
 })
 

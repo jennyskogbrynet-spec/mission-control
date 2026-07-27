@@ -10,6 +10,7 @@ import { normalizeTaskUpdateStatus } from '@/lib/task-status';
 import { syncTaskOutbound } from '@/lib/github-sync-engine';
 import { removeTaskFromGnap } from '@/lib/gnap-sync';
 import { config } from '@/lib/config';
+import { normalizeTaskMetadata } from '@/lib/mc-agentic-os';
 
 function formatTicketRef(prefix?: string | null, num?: number | null): string | undefined {
   if (!prefix || typeof num !== 'number' || !Number.isFinite(num) || num <= 0) return undefined
@@ -19,9 +20,41 @@ function formatTicketRef(prefix?: string | null, num?: number | null): string | 
 function mapTaskRow(task: any): Task & { tags: string[]; metadata: Record<string, unknown> } {
   return {
     ...task,
-    tags: task.tags ? JSON.parse(task.tags) : [],
-    metadata: task.metadata ? JSON.parse(task.metadata) : {},
+    tags: parseTaskTags(task.tags),
+    metadata: parseTaskMetadata(task.metadata),
     ticket_ref: formatTicketRef(task.project_prefix, task.project_ticket_no),
+  }
+}
+
+function parseTaskTags(raw: unknown): string[] {
+  if (raw == null || raw === '') return []
+  if (Array.isArray(raw)) return raw.filter((tag): tag is string => typeof tag === 'string')
+
+  const text = String(raw).trim()
+  if (!text) return []
+
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) return parsed.filter((tag): tag is string => typeof tag === 'string')
+  } catch {
+    // Legacy rows sometimes contain comma-separated tags instead of JSON.
+  }
+
+  return text
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+function parseTaskMetadata(raw: unknown): Record<string, unknown> {
+  if (raw == null || raw === '') return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+
+  try {
+    const parsed = JSON.parse(String(raw))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
   }
 }
 
@@ -37,6 +70,11 @@ function hasAegisApproval(
     LIMIT 1
   `).get(taskId, workspaceId) as { status?: string } | undefined
   return review?.status === 'approved'
+}
+
+function shouldReleaseClaimOnTerminalStatus(status: string | undefined, task: Task): boolean {
+  if (!status || !['done', 'failed', 'wontfix'].includes(status)) return false
+  return ['Claimed', 'Running'].includes(String((task as any).claim_state ?? ''))
 }
 
 /**
@@ -264,9 +302,34 @@ export async function PUT(
       fieldsToUpdate.push('tags = ?');
       updateParams.push(JSON.stringify(tags));
     }
-    if (metadata !== undefined) {
+    const metadataShouldRefresh = metadata !== undefined
+      || title !== undefined
+      || description !== undefined
+      || assigned_to !== undefined
+      || priority !== undefined
+      || tags !== undefined
+      || normalizedStatus !== undefined
+    if (metadataShouldRefresh) {
+      const currentMetadata = parseTaskMetadata(currentTask.metadata)
+      const nextMetadataInput = metadata !== undefined
+        ? { ...currentMetadata, ...metadata }
+        : currentMetadata
+      const normalizedMetadata = normalizeTaskMetadata(nextMetadataInput, {
+        title: title ?? currentTask.title,
+        description: description ?? currentTask.description,
+        assigned_to: assigned_to ?? currentTask.assigned_to,
+        priority: priority ?? currentTask.priority,
+        status: normalizedStatus ?? currentTask.status,
+        tags: tags ?? parseTaskTags(currentTask.tags),
+      })
       fieldsToUpdate.push('metadata = ?');
-      updateParams.push(JSON.stringify(metadata));
+      updateParams.push(JSON.stringify(normalizedMetadata));
+    }
+    const releaseActiveClaim = shouldReleaseClaimOnTerminalStatus(normalizedStatus, currentTask)
+    if (releaseActiveClaim) {
+      fieldsToUpdate.push("claim_state = 'Released'");
+      fieldsToUpdate.push('claimed_by = NULL');
+      fieldsToUpdate.push('claimed_at = NULL');
     }
     
     fieldsToUpdate.push('updated_at = ?');
@@ -336,6 +399,9 @@ export async function PUT(
 
     if (project_id !== undefined && project_id !== currentTask.project_id) {
       changes.push(`project: ${currentTask.project_id || 'none'} → ${project_id}`);
+    }
+    if (releaseActiveClaim) {
+      changes.push('claim released after terminal status');
     }
     if (outcome !== undefined && outcome !== currentTask.outcome) {
       changes.push(`outcome: ${currentTask.outcome || 'unset'} → ${outcome || 'unset'}`);

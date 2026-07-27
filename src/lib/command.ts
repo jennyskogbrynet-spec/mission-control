@@ -77,14 +77,27 @@ export function runCommand(
 }
 
 export function runOpenClaw(args: string[], options: CommandOptions = {}) {
+  const pathParts = [
+    '/opt/homebrew/opt/node/bin',
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+    options.env?.PATH || '',
+    process.env.PATH || '',
+  ].filter(Boolean)
+
   // Explicitly pass OPENCLAW_STATE_DIR so the CLI uses the exact resolved path.
   // Without this, the CLI may interpret OPENCLAW_HOME as a parent directory and
   // append ".openclaw" to it — causing double-nesting when OPENCLAW_HOME is
   // already set to the state directory (e.g. /root/.openclaw → /root/.openclaw/.openclaw).
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    OPENCLAW_STATE_DIR: config.openclawStateDir,
     ...options.env,
+    PATH: pathParts.join(':'),
+    OPENCLAW_STATE_DIR: config.openclawStateDir,
   }
   return runCommand(config.openclawBin, args, {
     ...options,
