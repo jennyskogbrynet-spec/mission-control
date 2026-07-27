@@ -391,3 +391,24 @@ describe('createMessageSchema', () => {
     expect(result.success).toBe(false)
   })
 })
+
+describe('qualityReviewSchema revision binding', () => {
+  it('accepts an integer expected_updated_at', () => {
+    const result = qualityReviewSchema.safeParse({
+      taskId: 1, reviewer: 'vera', status: 'approved', notes: 'ok', expected_updated_at: 1753640000,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('remains optional for backward-compatible callers', () => {
+    const result = qualityReviewSchema.safeParse({ taskId: 1, status: 'approved', notes: 'ok' })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects a non-integer expected_updated_at', () => {
+    const result = qualityReviewSchema.safeParse({
+      taskId: 1, status: 'approved', notes: 'ok', expected_updated_at: 17.5,
+    })
+    expect(result.success).toBe(false)
+  })
+})

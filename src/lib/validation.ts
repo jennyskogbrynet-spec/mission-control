@@ -216,6 +216,9 @@ export const qualityReviewSchema = z.object({
   reviewer: z.string().default('aegis'),
   status: z.enum(['approved', 'rejected', 'in_progress']),
   notes: z.string().min(1, 'Notes are required for quality reviews'),
+  // Revision binding: when provided, the review only applies if the task's
+  // updated_at still matches — otherwise the API returns 409 stale_review.
+  expected_updated_at: z.number().int().optional(),
 })
 
 export const spawnAgentSchema = z.object({

@@ -78,18 +78,20 @@ export async function POST(request: NextRequest) {
   try {
     const validated = await validateBody(request, qualityReviewSchema)
     if ('error' in validated) return validated.error
-    const { taskId, reviewer, status, notes } = validated.data
+    const { taskId, reviewer, status, notes, expected_updated_at } = validated.data
 
     const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1;
 
     const task = db
-      .prepare('SELECT id, title, assigned_to, retry_count, tags, claim_state, claimed_at FROM tasks WHERE id = ? AND workspace_id = ?')
+      .prepare('SELECT id, title, assigned_to, claimed_by, updated_at, retry_count, tags, claim_state, claimed_at FROM tasks WHERE id = ? AND workspace_id = ?')
       .get(taskId, workspaceId) as
         | {
             id: number
             title: string
             assigned_to: string | null
+            claimed_by: string | null
+            updated_at: number | null
             retry_count: number | null
             tags: string | null
             claim_state: string | null
@@ -98,6 +100,37 @@ export async function POST(request: NextRequest) {
         | undefined
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 })
+    }
+
+    // Separation of duties: the agent that did (or claimed) the work cannot
+    // approve/reject it. Checked against both the reviewer field and the
+    // authenticated agent identity so a caller cannot bypass it by relabeling.
+    const workingParties = [task.assigned_to, task.claimed_by]
+      .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      .map((v) => v.trim().toLowerCase())
+    const reviewerIdentities = [reviewer, auth.user.agent_name ?? '']
+      .map((v) => v.trim().toLowerCase())
+      .filter((v) => v.length > 0)
+    if (status !== 'in_progress' && reviewerIdentities.some((r) => workingParties.includes(r))) {
+      return NextResponse.json(
+        {
+          error: 'separation_of_duties',
+          detail: `Reviewer "${reviewer}" matches the task's working agent (assigned_to/claimed_by). A different agent must review.`,
+        },
+        { status: 403 },
+      )
+    }
+
+    // Revision binding: reject reviews of a task state the reviewer has not seen.
+    if (expected_updated_at !== undefined && task.updated_at !== expected_updated_at) {
+      return NextResponse.json(
+        {
+          error: 'stale_review',
+          detail: 'Task changed since the reviewed revision. Re-fetch and re-review.',
+          current_updated_at: task.updated_at,
+        },
+        { status: 409 },
+      )
     }
 
     if (status === 'in_progress') {

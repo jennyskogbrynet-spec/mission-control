@@ -92,7 +92,36 @@ async function runBackup(): Promise<{ ok: boolean; message: string }> {
 }
 
 /** Run data cleanup based on retention settings */
+/**
+ * Backup freshness alert (committee P0-3): the auto-backup silently never ran
+ * for two months because the tick defaulted it to disabled. Broadcast + audit
+ * when the newest automatic backup is older than the alert threshold so a
+ * silent regression can never go unnoticed again.
+ */
+function checkBackupFreshness(): void {
+  const maxAgeHours = 26
+  let newestMs = 0
+  try {
+    for (const f of readdirSync(BACKUP_DIR)) {
+      if (!f.startsWith('mc-backup-') || !f.endsWith('.db')) continue
+      const mtime = statSync(join(BACKUP_DIR, f)).mtimeMs
+      if (mtime > newestMs) newestMs = mtime
+    }
+  } catch {
+    newestMs = 0
+  }
+  const ageHours = newestMs === 0 ? Infinity : (Date.now() - newestMs) / 3_600_000
+  if (ageHours <= maxAgeHours) return
+  const detail = newestMs === 0
+    ? 'No automatic backup (mc-backup-*.db) exists at all'
+    : `Newest automatic backup is ${Math.round(ageHours)}h old (threshold ${maxAgeHours}h)`
+  logger.error({ backupDir: BACKUP_DIR, ageHours }, `Backup freshness alert: ${detail}`)
+  logAuditEvent({ action: 'backup_stale', actor: 'scheduler', detail: { message: detail } })
+  eventBus.broadcast('backup.stale', { detail, newest_backup_ms: newestMs || null })
+}
+
 async function runCleanup(): Promise<{ ok: boolean; message: string }> {
+  checkBackupFreshness()
   try {
     const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
@@ -434,7 +463,7 @@ async function tick() {
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
@@ -494,7 +523,7 @@ export function getSchedulerStatus() {
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,

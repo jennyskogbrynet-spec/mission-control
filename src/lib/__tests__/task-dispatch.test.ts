@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTaskPrompt, classifyDirectModel, resolveDispatchFailureStatus, resolveDispatchResourcePolicy, resolveGatewayAgentIdForReview, resolveTaskDispatchModelOverride } from '@/lib/task-dispatch'
+import { buildTaskPrompt, classifyDirectModel, pickDispatchIdempotencyKey, resolveDispatchFailureStatus, resolveDispatchResourcePolicy, resolveGatewayAgentIdForReview, resolveTaskDispatchModelOverride } from '@/lib/task-dispatch'
 
 describe('resolveTaskDispatchModelOverride', () => {
   it('returns null when the agent has no explicit dispatch model override', () => {
@@ -209,5 +209,30 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain('Autonomy level: auto')
     expect(prompt).toContain('Proof expected: vitest and typecheck pass')
     expect(prompt).toContain('Stop rule:')
+  })
+})
+
+describe('pickDispatchIdempotencyKey', () => {
+  it('reuses a persisted key for the same task across retries', () => {
+    const meta = { dispatch_idempotency_key: 'task-dispatch-42-abc' }
+    const result = pickDispatchIdempotencyKey(meta, 42, () => 'should-not-be-used')
+    expect(result).toEqual({ key: 'task-dispatch-42-abc', minted: false })
+  })
+
+  it('mints a stable key when none is persisted', () => {
+    const result = pickDispatchIdempotencyKey({}, 7, () => 'uuid-1')
+    expect(result).toEqual({ key: 'task-dispatch-7-uuid-1', minted: true })
+  })
+
+  it('rejects a key persisted for a different task id', () => {
+    const meta = { dispatch_idempotency_key: 'task-dispatch-99-abc' }
+    const result = pickDispatchIdempotencyKey(meta, 7, () => 'uuid-2')
+    expect(result).toEqual({ key: 'task-dispatch-7-uuid-2', minted: true })
+  })
+
+  it('ignores non-string persisted values', () => {
+    const meta = { dispatch_idempotency_key: 123 as unknown }
+    const result = pickDispatchIdempotencyKey(meta as Record<string, unknown>, 7, () => 'uuid-3')
+    expect(result.minted).toBe(true)
   })
 })

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import { getDatabase, db_helpers } from './db'
 import { runOpenClaw } from './command'
 import { callOpenClawGateway } from './openclaw-gateway'
@@ -144,6 +145,44 @@ export function resolveDispatchFailureStatus(
     newAttempts,
     terminal: newAttempts >= resourcePolicy.maxRetries,
   }
+}
+
+/**
+ * Pick (or mint) the stable idempotency key for a task's current logical
+ * assignment. The key MUST NOT vary across retries — a timestamped key defeats
+ * gateway-side deduplication, which is how duplicate task deliveries happened
+ * (committee finding P0-1, observed on TASK-806 2026-07-27). The key is only
+ * rotated when a fresh delivery is intentional (stale requeue).
+ */
+export function pickDispatchIdempotencyKey(
+  metadata: Record<string, unknown>,
+  taskId: number,
+  mintUuid: () => string = randomUUID,
+): { key: string; minted: boolean } {
+  const existing = metadata.dispatch_idempotency_key
+  if (typeof existing === 'string' && existing.startsWith(`task-dispatch-${taskId}-`)) {
+    return { key: existing, minted: false }
+  }
+  return { key: `task-dispatch-${taskId}-${mintUuid()}`, minted: true }
+}
+
+function resolveDispatchIdempotencyKey(db: ReturnType<typeof getDatabase>, taskId: number): string {
+  const row = db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(taskId) as { metadata: string | null } | undefined
+  const metadata = parseTaskMetadata(row?.metadata ?? null)
+  const { key, minted } = pickDispatchIdempotencyKey(metadata, taskId)
+  if (minted) {
+    metadata.dispatch_idempotency_key = key
+    db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), taskId)
+  }
+  return key
+}
+
+function rotateDispatchIdempotencyKey(db: ReturnType<typeof getDatabase>, taskId: number): void {
+  const row = db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(taskId) as { metadata: string | null } | undefined
+  const metadata = parseTaskMetadata(row?.metadata ?? null)
+  if (metadata.dispatch_idempotency_key === undefined) return
+  delete metadata.dispatch_idempotency_key
+  db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), taskId)
 }
 
 function formatJsonish(value: unknown): string | undefined {
@@ -442,6 +481,7 @@ interface ReviewableTask {
   project_ticket_no: number | null
   claim_state: string | null
   claimed_at: string | number | null
+  updated_at: number | null
 }
 
 export function resolveGatewayAgentIdForReview(
@@ -559,7 +599,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
   const tasks = db.prepare(`
     SELECT t.id, t.title, t.description, t.status, t.priority, t.resolution, t.assigned_to, t.workspace_id,
-           t.claim_state, t.claimed_at,
+           t.claim_state, t.claimed_at, t.updated_at,
            t.project_id, p.ticket_prefix, t.project_ticket_no, a.config as agent_config
     FROM tasks t
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
@@ -608,7 +648,9 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
         const invokeParams = {
           message: prompt,
           agentId: reviewAgent,
-          idempotencyKey: `aegis-review-${task.id}-${Date.now()}`,
+          // Stable per task revision so gateway-side dedupe absorbs re-sends of
+          // the same review; a new revision (updated_at change) mints a new key.
+          idempotencyKey: `aegis-review-${task.id}-${task.updated_at ?? 0}`,
           deliver: false,
         }
         const finalResult = await runOpenClaw(
@@ -825,6 +867,10 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
       db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
         .run('assigned', `Requeued: agent "${task.assigned_to}" went offline while task was in_progress in lane "${resourcePolicy.lane}"`, newAttempts, now, task.id)
 
+      // A requeue is an intentional fresh delivery — rotate the idempotency key
+      // so the gateway does not dedupe the new dispatch against the dead one.
+      rotateDispatchIdempotencyKey(db, task.id)
+
       // Add a comment explaining the requeue
       db.prepare(`
         INSERT INTO comments (task_id, author, content, created_at, workspace_id)
@@ -886,6 +932,9 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   for (const task of tasks) {
     const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
+    // Set once the task prompt may have reached the agent. From that point a
+    // failure is AMBIGUOUS (the agent may be working) and must not auto-retry.
+    let deliveryAttempted = false
     // Mark as in_progress immediately to prevent re-dispatch
     db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
       .run('in_progress', now, task.id)
@@ -936,19 +985,22 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       let agentResponse: AgentResponseParsed
       const useDirectApi = !isGatewayAvailable() && getAnthropicApiKey()
+      const dispatchIdempotencyKey = resolveDispatchIdempotencyKey(db, task.id)
 
       if (useDirectApi && !targetSession) {
         // Direct Claude API dispatch — no gateway needed
+        deliveryAttempted = true
         agentResponse = await callClaudeDirectly(task, prompt, resourcePolicy.timeoutMs)
       } else if (targetSession) {
         // Dispatch to a specific existing session via chat.send
         logger.info({ taskId: task.id, targetSession, agent: task.agent_name }, 'Dispatching task to targeted session')
+        deliveryAttempted = true
         const sendResult = await callOpenClawGateway<any>(
           'chat.send',
           {
             sessionKey: targetSession,
             message: prompt,
-            idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+            idempotencyKey: dispatchIdempotencyKey,
             deliver: false,
           },
           resourcePolicy.timeoutMs + 5_000,
@@ -969,7 +1021,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         const invokeParams: Record<string, unknown> = {
           message: prompt,
           agentId: gatewayAgentId,
-          idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+          idempotencyKey: dispatchIdempotencyKey,
           deliver: false,
         }
         // Route to appropriate model tier based on task complexity.
@@ -979,6 +1031,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         // Use --expect-final to block until the agent completes and returns the full
         // response payload (result.payloads[0].text). The two-step agent → agent.wait
         // pattern only returns lifecycle metadata and never includes the agent's text.
+        deliveryAttempted = true
         const finalResult = await runOpenClaw(
           ['gateway', 'call', 'agent', '--expect-final', '--timeout', String(resourcePolicy.timeoutMs), '--params', JSON.stringify(invokeParams), '--json'],
           { timeoutMs: resourcePolicy.timeoutMs + 5_000 }
@@ -1060,6 +1113,39 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     } catch (err: any) {
       const errorMsg = err.message || 'Unknown error'
       logger.error({ taskId: task.id, agent: task.agent_name, err }, 'Task dispatch failed')
+
+      if (deliveryAttempted) {
+        // AMBIGUOUS failure: the prompt may already have reached the agent
+        // (timeout waiting for the final response, parse failure, empty
+        // response). Auto-retrying here is what produced duplicate task
+        // deliveries (P0-1). Park in awaiting_owner for triage instead.
+        const nowTs = Math.floor(Date.now() / 1000)
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, updated_at = ? WHERE id = ?')
+          .run('awaiting_owner', `Ambiguous dispatch failure (delivery attempted, outcome unknown): ${errorMsg.substring(0, 4000)}`, nowTs, task.id)
+        db.prepare(`
+          INSERT INTO comments (task_id, author, content, created_at, workspace_id)
+          VALUES (?, 'scheduler', ?, ?, ?)
+        `).run(task.id, `Dispatch outcome unknown after delivery attempt (lane ${resourcePolicy.lane}): ${errorMsg.substring(0, 500)}. Not auto-retried to avoid duplicate delivery — verify the agent session before requeueing.`, nowTs, task.workspace_id)
+        eventBus.broadcast('task.status_changed', {
+          id: task.id,
+          status: 'awaiting_owner',
+          previous_status: 'in_progress',
+          error_message: errorMsg.substring(0, 500),
+          reason: 'ambiguous_dispatch_failure',
+        })
+        syncAndEscalateIfFailed(task, 'awaiting_owner')
+        db_helpers.logActivity(
+          'task_dispatch_ambiguous',
+          'task',
+          task.id,
+          'scheduler',
+          `Ambiguous dispatch failure for "${task.title}" — parked in awaiting_owner: ${errorMsg.substring(0, 200)}`,
+          { error: errorMsg.substring(0, 1000), lane: resourcePolicy.lane },
+          task.workspace_id
+        )
+        results.push({ id: task.id, success: false, error: errorMsg.substring(0, 100) })
+        continue
+      }
 
       // Increment dispatch_attempts and decide next status
       const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ?').get(task.id) as { dispatch_attempts: number } | undefined)?.dispatch_attempts ?? 0
