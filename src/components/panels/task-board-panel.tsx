@@ -47,6 +47,9 @@ interface Task {
   comment_count?: number
   error_message?: string
   dispatch_attempts?: number
+  claim_state?: string
+  claimed_by?: string
+  claimed_at?: string | number
 }
 
 interface Agent {
@@ -1195,6 +1198,131 @@ export function TaskBoardPanel() {
 }
 
 // Task Detail Modal Component (placeholder - would be implemented separately)
+function evidenceLabel(entry: unknown, index: number): { label: string; href?: string } {
+  if (typeof entry === 'string') {
+    return /^https?:\/\//.test(entry) ? { label: entry, href: entry } : { label: entry }
+  }
+  if (entry && typeof entry === 'object') {
+    const rec = entry as Record<string, unknown>
+    const href = [rec.url, rec.link, rec.href].find((v): v is string => typeof v === 'string' && /^https?:\/\//.test(v))
+    const label = [rec.label, rec.title, rec.description, rec.path, href].find((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    return { label: label || `Evidence #${index + 1}`, href }
+  }
+  return { label: `Evidence #${index + 1}` }
+}
+
+function WorkflowContractSection({ task }: { task: Task }) {
+  const [expanded, setExpanded] = useState(false)
+  const contract = task.metadata?.workflow_contract || {}
+  const evidence: unknown[] = Array.isArray(task.metadata?.agentic_os?.evidence)
+    ? task.metadata.agentic_os.evidence
+    : []
+  const claimState = task.claim_state || 'Unclaimed'
+  const claimActive = claimState === 'Claimed' || claimState === 'Running'
+  const ownerAgent = contract.owner_agent || task.assigned_to
+
+  return (
+    <div className="pt-3 border-t border-border/30 space-y-2">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        className="w-full flex items-center gap-2 text-left group"
+      >
+        <svg
+          className={`w-3 h-3 text-muted-foreground/60 transition-transform ${expanded ? 'rotate-90' : ''}`}
+          viewBox="0 0 16 16" fill="currentColor"
+        >
+          <path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z" />
+        </svg>
+        <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px] group-hover:text-muted-foreground transition-colors">
+          Workflow Contract
+        </span>
+        {contract.workflow_template && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 font-mono">
+            {contract.workflow_template}
+          </span>
+        )}
+        <span className={`text-[10px] px-1.5 py-0.5 rounded border font-mono ${
+          claimActive
+            ? 'bg-green-500/10 border-green-500/25 text-green-400'
+            : claimState === 'Released'
+              ? 'bg-yellow-500/10 border-yellow-500/25 text-yellow-400'
+              : 'bg-secondary/50 border-border/30 text-muted-foreground'
+        }`}>
+          {claimState}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="grid grid-cols-2 gap-3 text-xs pl-5">
+          {contract.workflow_template && (
+            <div className="space-y-0.5">
+              <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Ticket Type</span>
+              <div className="text-foreground font-mono">{contract.workflow_template}</div>
+            </div>
+          )}
+          <div className="space-y-0.5">
+            <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Claim</span>
+            <div className="text-foreground font-mono">
+              {claimState}
+              {task.claimed_by && <span className="text-muted-foreground"> · {task.claimed_by}</span>}
+            </div>
+            {task.claimed_at && (
+              <div className="text-muted-foreground/60">
+                {new Date(typeof task.claimed_at === 'number' ? task.claimed_at * 1000 : task.claimed_at).toLocaleString()}
+              </div>
+            )}
+          </div>
+          {ownerAgent && (
+            <div className="space-y-0.5">
+              <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Agent</span>
+              <div className="flex items-center gap-1.5 text-foreground">
+                <AgentAvatar name={ownerAgent} size="xs" />
+                {ownerAgent}
+              </div>
+            </div>
+          )}
+          {contract.autonomy_level && (
+            <div className="space-y-0.5">
+              <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Autonomy</span>
+              <div className="text-foreground font-mono">{contract.autonomy_level}</div>
+            </div>
+          )}
+          {contract.proof_expected && (
+            <div className="space-y-0.5 col-span-2">
+              <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Proof Expected</span>
+              <div className="text-foreground/80">{contract.proof_expected}</div>
+            </div>
+          )}
+          {evidence.length > 0 && (
+            <div className="space-y-1 col-span-2">
+              <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">Evidence</span>
+              <div className="flex flex-wrap gap-2">
+                {evidence.map((entry, i) => {
+                  const { label, href } = evidenceLabel(entry, i)
+                  const chip = (
+                    <span className="inline-flex items-center text-xs px-2 py-1 rounded-md bg-secondary/50 border border-border/30 text-foreground/80 max-w-[280px] truncate font-mono">
+                      {label}
+                    </span>
+                  )
+                  return href ? (
+                    <a key={i} href={href} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 transition-opacity">
+                      {chip}
+                    </a>
+                  ) : (
+                    <span key={i}>{chip}</span>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TaskDetailModal({
   task,
   agents,
@@ -1611,7 +1739,7 @@ function TaskDetailModal({
               </div>
 
               {/* GitHub section */}
-              {(task.github_issue_number || task.github_branch || task.github_pr_number) && (
+              {(task.github_issue_number || task.github_branch || task.github_pr_number || task.metadata?.github_pr_url) && (
                 <div className="pt-3 border-t border-border/30 space-y-2">
                   <span className="text-muted-foreground/60 uppercase tracking-wider text-[10px]">GitHub</span>
                   <div className="flex flex-wrap gap-2">
@@ -1641,6 +1769,17 @@ function TaskDetailModal({
                         PR #{task.github_pr_number}
                       </a>
                     )}
+                    {!task.github_pr_number && task.metadata?.github_pr_url && (
+                      <a
+                        href={task.metadata.github_pr_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-green-500/10 border border-green-500/25 text-green-400 font-mono transition-colors hover:opacity-80"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z"/></svg>
+                        {task.metadata.github_pr_url.replace(/^https:\/\/github\.com\//, '')}
+                      </a>
+                    )}
                     {task.github_branch && (
                       <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-secondary/50 border border-border/30 text-foreground/60 font-mono">
                         <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M11.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122V6A2.5 2.5 0 0110 8.5H6a1 1 0 00-1 1v1.128a2.251 2.251 0 11-1.5 0V5.372a2.25 2.25 0 111.5 0v1.836A2.492 2.492 0 016 7h4a1 1 0 001-1v-.628A2.25 2.25 0 019.5 3.25zM4.25 12a.75.75 0 100 1.5.75.75 0 000-1.5zM3.5 3.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0z"/></svg>
@@ -1649,6 +1788,11 @@ function TaskDetailModal({
                     )}
                   </div>
                 </div>
+              )}
+
+              {/* Workflow contract */}
+              {task.metadata?.workflow_contract && (
+                <WorkflowContractSection task={task} />
               )}
 
               {/* Agent session */}
