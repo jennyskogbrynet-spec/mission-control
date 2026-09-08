@@ -33,3 +33,9 @@ Release files and rollback evidence are retained locally in `~/tmp/ines-hq-relea
 - PostHog is the implemented product adapter for Babysential. GSC, BabyHub analytics, social and financial providers were inventoried but are not newly connected in HQ. Existing MC operational panels remain available.
 - Restricted Skool coursework and Nate's private backend were not accessed. The public package, source ledger, transcript and selected demo visuals have separate explicit coverage records in the vault report.
 - The usage follow-up is real future work. No claimed productivity increase, semantic graph distance or causal product lift follows from the successful technical release.
+
+## Final delivery addendum
+
+The date-precision correction was independently reviewed and passed all 15 knowledge/route tests, including date-only, leap-year, impossible-day, invalid-time and explicit-offset cases. A new full production build passed. Code commit on the operational branch: `32b13cd` (isolated follow-up: `ab6051f`). The active final build is `-zwAevJVVqzHwKmtHAcKh`, activated at 2026-09-08T00:11:58Z with HTTP 200 and 1,140 notes, 154 note links and 200 prioritized tasks. A subsequent authenticated read of the newly created learning returned exactly `sourceDate: "2026-09-08"`; its calendar precision is preserved. The initial result note remains an immutable record of the first successful release.
+
+The preceding HQ build and a fresh consistent database backup are retained in `~/tmp/ines-hq-release-20260908-v2/`. This final activation completed with bounded launchd startup and no rollback or database restore. Both source commits are integrated into the original local operational branch; the four pre-existing uncommitted changes remain separately owned. The release was local, with no public deployment or external message.

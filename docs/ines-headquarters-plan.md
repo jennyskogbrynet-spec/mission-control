@@ -50,13 +50,15 @@ Isolated branch: codex/ines-hq-20260908. Existing edits to start-standalone, eve
 - [x] Carry criteria, evidence and measured/unmeasured state across the existing task flow.
 - [x] Integrate into primary MC navigation and retain existing operational panels.
 
-### Task 6: Independent review, runtime QA and local release [in-progress]
+### Task 6: Independent review, runtime QA and local release [done]
 - depends_on: [5]
 - blocks: []
 - priority: high
 - Owner: independent reviewer + parent.
 - [x] Targeted tests, TypeScript, lint/build, independent review. 132 repository tests pass (82 HQ + 50 gateway/auth/config); independent fixtures pass; Next production build passes.
-- [ ] Test real data, source opening/search, task persistence/deduplication and metrics.
-- [ ] Browser QA on desktop/mobile and authenticated access.
-- [ ] Activate local MC build with backup/rollback and verify running version.
-- [ ] Archive research and sync final operational facts to vault.
+- [x] Test real data, source opening/search, task persistence/deduplication and metrics.
+- [x] Browser QA on desktop and authenticated access; responsive CSS/component checks. Separate mobile capture unavailable; limitation recorded in runtime QA.
+- [x] Activate local MC build with backup/rollback and verify running version.
+- [x] Archive research and sync final operational facts to vault.
+
+Final delivery: active on port 3005, build `-zwAevJVVqzHwKmtHAcKh`. Production task 1295 / TASK-1031 and its immutable learning prove the actual source → task → result → vault chain. Future first-week usage evaluation is tracked separately in that task; no productivity gain is claimed.
