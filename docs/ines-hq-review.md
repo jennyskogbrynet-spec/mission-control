@@ -1,8 +1,8 @@
 # Independent Ines HQ review — 2026-09-08
 
-**FINAL PASS, including the final shared evidence-validation and protocol-v4 corrections. All eight reviewer findings are closed; the subsequent bounded corrections pass review and targeted tests. No remaining P1/P2 within scope. This verdict and the current consolidated fingerprints supersede earlier checkpoints.**
+**FINAL PASS, including shared evidence validation, protocol v4 and the final source-date precision correction. All eight reviewer findings are closed; the subsequent bounded corrections pass review and targeted tests. No remaining P1/P2 within scope. This verdict and the current consolidated fingerprints supersede earlier checkpoints.**
 
-Reviewer: `independent_review`. Initial integrated review: 2026-09-07T23:47:08.138827+00:00. Final bounded review: 2026-09-08T00:01:29.653996+00:00. Base commit: `cc47ba6448eb2fd463d29624d49e1d6ab80e7766`; this verdict covers the uncommitted source fingerprints below. Parent owns build, authenticated live/browser QA and activation/rollback verification; this is not a claim that deployment or all runtime checks are complete.
+Reviewer: `independent_review`. Initial integrated review: 2026-09-07T23:47:08.138827+00:00. Final bounded review: 2026-09-08T00:10:31.414828+00:00. Base commit: `cc47ba6448eb2fd463d29624d49e1d6ab80e7766`; this verdict covers the source fingerprints below. Parent owns build, authenticated live/browser QA and activation/rollback verification; this is not a claim that deployment or all runtime checks are complete.
 
 ## Scope and method
 
@@ -65,7 +65,7 @@ Parent owns the build/type/lint record, authenticated runtime read/write/readbac
 
 ## Current reviewed source fingerprints
 
-Consolidated at 2026-09-08T00:01:29.653996+00:00; these 35 hashes supersede all earlier source fingerprints in this review. Combined manifest SHA-256: `899b61ea1f7affe2471d5137a0b1653cacfef8046a6676a751723b45b1f0232a`. The manifest uses sorted paths and one `SHA256  path` line per file, including a final newline.
+Consolidated at 2026-09-08T00:10:31.414828+00:00; these 36 hashes supersede all earlier source fingerprints in this review. Combined manifest SHA-256: `7736eb8cbe39ea7b72d025f08a108aae7f85ae48cf3c5d18ecb9edda78fbea4d`. The manifest uses sorted paths and one `SHA256  path` line per file, including a final newline.
 
 - `src/app/[[...panel]]/page.tsx`: `8da723d6275745d8ae9150032035a2cd44915f0e92ab2b589f64a4574995af87`
 - `src/app/api/headquarters/knowledge/route.ts`: `0686ccc761ac7dce326aff5618e6b81f7cf4d212ff8eac8107ce62a4ce380b96`
@@ -88,11 +88,12 @@ Consolidated at 2026-09-08T00:01:29.653996+00:00; these 35 hashes supersede all 
 - `src/components/headquarters/use-hq-resource.ts`: `71b1d14260c37f613abd4b7d9efe48fb621f1d519769b15e602e922d1ff96f53`
 - `src/components/layout/nav-rail.tsx`: `52c4a38e91f7b241d6e3c1edea799609556f7effbd3499b68d6963d0632c8b28`
 - `src/components/panels/task-board-panel.tsx`: `2174f5be84bb554a2cb0c8939ee80bc918cce2f38c2cd256e9c36dac6b6cf3f9`
+- `src/lib/__tests__/hq-knowledge.test.ts`: `5cc5da98b03a5d3d112da284ab7ec32c463dad3465ee0f6b9edcd83d18225606`
 - `src/lib/__tests__/websocket-handshake.test.tsx`: `b87afbd047df52372169798306285dab178378c0ca6e29bbd86b770527a363e2`
 - `src/lib/hq-access.ts`: `e225cc005df0fc1bfa08e7d6fe33c6565cbbbf9331d77a034ec4811a8ff4457a`
 - `src/lib/hq-evidence-input.ts`: `244c8a27eecf88babc5f6369bb1f71605c3e6f15a0191471c66e121b5faa78b3`
 - `src/lib/hq-evidence.ts`: `bc951fb2afb1bdd176d7345f9fae65871ff9c6969c534dcf638c76d6b6135c41`
-- `src/lib/hq-knowledge.ts`: `cfc32956f8db15001f6a3d19b81bbf27a01d4f5a1ff25aa3ea35372a00d51120`
+- `src/lib/hq-knowledge.ts`: `64bc113fdae910e04acbaefc09aa86ea4f92303fe3e50d4ad40718b654289245`
 - `src/lib/hq-metrics.ts`: `7f5c991b7a5f3b89587a18474534c54b00b549131d67daf02e0ff5c3b494c3e4`
 - `src/lib/hq-operations.test.ts`: `1d248c9ce64af67ee9a2bbf539ed7c6a9ba8358fd5f06a038712cf0966dd3b27`
 - `src/lib/hq-operations.ts`: `9d4dd7f18121e6a897fc2bffee1afad6bfffe99ab6d31417149f7820237c81d1`
@@ -138,3 +139,20 @@ pnpm exec vitest run src/components/headquarters/headquarters.test.tsx src/lib/_
 ```
 
 **58/58 passed (27 UI + 3 handshake + 28 utilities).** These overlap the earlier review test runs; counts are not added as unique tests. Existing environment/tool notices did not fail any test. No new source, dependency, server, credential or environment change was made by the reviewer.
+
+
+## Final source-date precision addendum
+
+Reviewed 2026-09-08T00:10:31.414828+00:00. **PASS: no additional P1/P2 finding.** Scope is only `hq-knowledge.ts` and its knowledge-adapter regression test. Only that implementation file changed among the 35 previous fingerprints; the test file is now included in the current 36-file manifest.
+
+The adapter previously expanded `source_date: 2026-09-08` into midnight UTC, causing the source inspector to display a time that the source never specified. `parseSourceDate` now preserves a valid calendar date as `YYYY-MM-DD`; the existing inspector formatter already displays that form without a time and with a fixed UTC calendar interpretation. Calendar round-trip validation rejects impossible dates that JavaScript would otherwise roll into another month. Only explicitly zoned timestamps are normalized to UTC; impossible clock times and timestamps without a zone are rejected. Filesystem `modifiedAt`, source content, privacy and path handling are unchanged.
+
+The new temporary-vault fixture verifies output through the actual knowledge index, covering date-only precision, a valid leap day, invalid leap/month days, a `+02:00` timestamp, an impossible clock hour and a missing timezone. The existing Norwegian-title/source-date fixture now expects the original date precision.
+
+Independently executed:
+
+```bash
+pnpm exec vitest run src/lib/__tests__/hq-knowledge.test.ts src/lib/__tests__/hq-knowledge-route.test.ts
+```
+
+**15/15 passed (12 adapter + 3 route).** No unrelated investigation or runtime mutation was performed. Parent reports the preceding release is active and its source → task → learning workflow is verified; building and activating this small follow-up remains parent-owned.

@@ -72,7 +72,7 @@ describe('HQ bounded knowledge adapter', () => {
     const first = await getHQKnowledgeIndex()
     const target = first.notes.find(n => n.path.endsWith('øving.md'))!
     expect(target.title).toBe('Ærlig læring – øving')
-    expect(target.sourceDate).toBe('2025-02-03T00:00:00.000Z')
+    expect(target.sourceDate).toBe('2025-02-03')
     expect(target.modifiedAt).not.toBe(target.sourceDate)
     expect(target.summary).toContain('En nyttig forklaring')
     expect(target.summary).not.toMatch(/script|alert|https:/)
@@ -81,6 +81,27 @@ describe('HQ bounded knowledge adapter', () => {
     // Raw source is preserved; rendering safety belongs to the ReactMarkdown boundary.
     expect((await getHQNote(target.id))?.content).toContain('<script>alert(1)</script>')
     expect(first.notes.find(n => n.title === 'Bruk')?.sourceDate).toBeNull()
+  })
+
+  it('preserves calendar-date precision, normalizes zoned timestamps and rejects impossible source dates', async () => {
+    const cases: Array<[string, string | null]> = [
+      ['2026-09-08', '2026-09-08'],
+      ['2024-02-29', '2024-02-29'],
+      ['2026-09-08T12:34:56+02:00', '2026-09-08T10:34:56.000Z'],
+      ['2025-02-29', null],
+      ['2026-02-30T12:00:00Z', null],
+      ['2026-04-31', null],
+      ['2026-13-01', null],
+      ['2026-09-08T25:00:00Z', null],
+      ['2026-09-08T12:34:56', null],
+    ]
+    for (const [i, [source]] of cases.entries()) {
+      await note(`03-areas/concepts/date-${i}.md`, `---\nsource_date: ${source}\n---\n# Date ${i}\nKildens tidsoppløsning skal beholdes.`)
+    }
+    const index = await getHQKnowledgeIndex()
+    for (const [i, [, expected]] of cases.entries()) {
+      expect(index.notes.find(n => n.title === `Date ${i}`)?.sourceDate).toBe(expected)
+    }
   })
 
   it('resolves real links while refusing ambiguous names, external URLs and code examples', async () => {

@@ -133,12 +133,23 @@ export function safeMarkdownText(value: string): string {
   ).join(' ').replace(/\s+/g, ' ').trim()
 }
 
+function parseSourceDate(value: string | undefined): string | null {
+  const match = value?.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/)
+  if (!match) return null
+  const calendarDate = new Date(`${match[1]}T00:00:00.000Z`)
+  // Date.parse rolls impossible days into the next month; reject that rollover.
+  if (!Number.isFinite(calendarDate.getTime()) || calendarDate.toISOString().slice(0, 10) !== match[1]) return null
+  if (match[2] === undefined) return match[1]
+  if (Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4] || 0) > 59) return null
+  const timestamp = Date.parse(value!)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
 function toDocument(relative: string, projectKey: HQProjectKey, read: NonNullable<Awaited<ReturnType<typeof readDocument>>>): Document {
   const { fields, body } = metadata(read.content)
   const title = safeMarkdownText(fields.title?.[0] || body.match(/^#\s+(.+)$/m)?.[1] || path.posix.basename(relative, '.md'))
   const explicitDate = (fields.source_date || fields.sourcedate || fields.published || fields.published_at || fields.date)?.[0]
-  const sourceDate = explicitDate && /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(explicitDate) && Number.isFinite(Date.parse(explicitDate))
-    ? new Date(explicitDate).toISOString() : null
+  const sourceDate = parseSourceDate(explicitDate)
   const tags = (fields.tags || []).map(safeMarkdownText).filter(Boolean).slice(0, 30)
   const kind = relative.includes('/deep-learn/') || tags.includes('learning') ? 'learning'
     : /(?:decision|beslutning)/i.test(relative) || tags.includes('decision') ? 'decision'
