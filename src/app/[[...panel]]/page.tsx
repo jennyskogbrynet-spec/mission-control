@@ -6,6 +6,7 @@ import { NavRail } from '@/components/layout/nav-rail'
 import { HeaderBar } from '@/components/layout/header-bar'
 import { LiveFeed } from '@/components/layout/live-feed'
 import { Dashboard } from '@/components/dashboard/dashboard'
+import { HeadquartersPanel } from '@/components/headquarters/headquarters-panel'
 import { LogViewerPanel } from '@/components/panels/log-viewer-panel'
 import { CronManagementPanel } from '@/components/panels/cron-management-panel'
 import { MemoryBrowserPanel } from '@/components/panels/memory-browser-panel'
@@ -94,7 +95,7 @@ export default function Home() {
 
   // Sync URL → Zustand activeTab
   const pathname = usePathname()
-  const panelFromUrl = pathname === '/' ? 'overview' : pathname.slice(1)
+  const panelFromUrl = pathname === '/' ? 'headquarters' : pathname.slice(1)
   const normalizedPanel = panelFromUrl === 'sessions' ? 'chat' : panelFromUrl
 
   useEffect(() => {
@@ -136,10 +137,11 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (!bootComplete && initSteps.every(s => s.status === 'done')) {
+    const headquartersReady = normalizedPanel === 'headquarters' && stepStatuses.auth === 'done' && stepStatuses.capabilities === 'done'
+    if (!bootComplete && (headquartersReady || initSteps.every(s => s.status === 'done'))) {
       setBootComplete()
     }
-  }, [initSteps, bootComplete, setBootComplete])
+  }, [initSteps, bootComplete, setBootComplete, normalizedPanel, stepStatuses.auth, stepStatuses.capabilities])
 
   // Security console warning (anti-self-XSS)
   useEffect(() => {
@@ -441,14 +443,14 @@ export default function Home() {
       </div>
 
       {/* Right: Live feed (hidden on mobile) */}
-      {!showOnboarding && liveFeedOpen && (
+      {!showOnboarding && activeTab !== 'headquarters' && liveFeedOpen && (
         <div className="hidden lg:flex h-full">
           <LiveFeed />
         </div>
       )}
 
       {/* Floating button to reopen LiveFeed when closed */}
-      {!showOnboarding && !liveFeedOpen && (
+      {!showOnboarding && activeTab !== 'headquarters' && !liveFeedOpen && (
         <button
           onClick={toggleLiveFeed}
           className="hidden lg:flex fixed right-0 top-1/2 -translate-y-1/2 z-30 w-6 h-12 items-center justify-center bg-card border border-r-0 border-border rounded-l-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-all duration-200"
@@ -480,7 +482,7 @@ export default function Home() {
 }
 
 const ESSENTIAL_PANELS = new Set([
-  'overview', 'agents', 'tasks', 'chat', 'activity', 'logs', 'settings',
+  'headquarters', 'overview', 'agents', 'tasks', 'chat', 'activity', 'logs', 'settings',
 ])
 
 function ContentRouter({ tab }: { tab: string }) {
@@ -521,6 +523,8 @@ function ContentRouter({ tab }: { tab: string }) {
   }
 
   switch (tab) {
+    case 'headquarters':
+      return <HeadquartersPanel />
     case 'overview':
       return (
         <>

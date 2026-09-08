@@ -943,7 +943,7 @@ export const useMissionControl = create<MissionControlStore>()(
     setInterfaceMode: (mode) => set({ interfaceMode: mode }),
 
     // UI State — sidebar & layout persistence
-    activeTab: 'overview',
+    activeTab: 'headquarters',
     sidebarExpanded: (() => {
       if (typeof window === 'undefined') return false
       try { return localStorage.getItem('mc-sidebar-expanded') === 'true' } catch { return false }

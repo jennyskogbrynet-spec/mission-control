@@ -28,6 +28,7 @@ const navGroups: NavGroup[] = [
   {
     id: 'core',
     items: [
+      { id: 'headquarters', label: 'Hovedkvarter', icon: <MemoryIcon />, priority: true, essential: true },
       { id: 'overview', label: 'Overview', icon: <OverviewIcon />, priority: true, essential: true },
       { id: 'agents', label: 'Agents', icon: <AgentsIcon />, priority: true, essential: true },
       { id: 'tasks', label: 'Tasks', icon: <TasksIcon />, priority: true, essential: true },

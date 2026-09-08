@@ -22,9 +22,14 @@ import {
 
 const log = createClientLogger('WebSocket')
 
-// Gateway protocol version (v3 required by OpenClaw 2026.x)
-const PROTOCOL_VERSION = 3
-const DEFAULT_GATEWAY_CLIENT_ID = process.env.NEXT_PUBLIC_GATEWAY_CLIENT_ID || 'openclaw-control-ui'
+// Current OpenClaw operator/UI protocol. Only node/restart-probe clients retain
+// the v3 compatibility window (gateway-protocol/src/version.ts).
+const PROTOCOL_VERSION = 4
+const configuredGatewayClientId = process.env.NEXT_PUBLIC_GATEWAY_CLIENT_ID?.trim()
+// OpenClaw's closed protocol enum accepts openclaw-control-ui. Older MC
+// deployments used control-ui; normalize that alias before signing or sending.
+const DEFAULT_GATEWAY_CLIENT_ID = !configuredGatewayClientId || configuredGatewayClientId === 'control-ui'
+  ? 'openclaw-control-ui' : configuredGatewayClientId
 
 // Heartbeat configuration
 const PING_INTERVAL_MS = 30_000
@@ -223,6 +228,7 @@ export function useWebSocket() {
     } | undefined
 
     const cachedToken = getCachedDeviceToken()
+    const deviceToken = tokenOnlyFallbackRef.current ? undefined : (cachedToken || undefined)
 
     const clientId = DEFAULT_GATEWAY_CLIENT_ID
     const clientMode = 'ui'
@@ -279,9 +285,8 @@ export function useWebSocket() {
         role,
         scopes,
         caps: ['tool-events'],
-        auth: authToken ? { token: authToken } : undefined,
+        auth: authToken || deviceToken ? { token: authToken, deviceToken } : undefined,
         device,
-        deviceToken: tokenOnlyFallbackRef.current ? undefined : (cachedToken || undefined),
       }
     }
     log.info('Sending connect handshake')

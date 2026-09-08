@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useMissionControl } from '@/store'
 import { useSmartPoll } from '@/lib/use-smart-poll'
+import { useTaskDeepLink } from '@/lib/use-task-deep-link'
 
 import { createClientLogger } from '@/lib/client-logger'
 
@@ -394,7 +395,7 @@ interface SpawnFormData {
 export function TaskBoardPanel() {
   const t = useTranslations('taskBoard')
   const statusColumns = STATUS_COLUMN_KEYS.map(col => ({ ...col, title: t(col.titleKey as any) }))
-  const { tasks: storeTasks, setTasks: storeSetTasks, selectedTask, setSelectedTask, activeProject, availableModels, spawnRequests, addSpawnRequest, updateSpawnRequest, dashboardMode } = useMissionControl()
+  const { tasks: storeTasks, setTasks: storeSetTasks, selectedTask, setSelectedTask, activeProject, activeTenant, currentUser, availableModels, spawnRequests, addSpawnRequest, updateSpawnRequest, dashboardMode } = useMissionControl()
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -422,7 +423,14 @@ export function TaskBoardPanel() {
   const [gnapSyncing, setGnapSyncing] = useState(false)
   const isLocal = dashboardMode === 'local'
   const dragCounter = useRef(0)
-  const selectedTaskIdFromUrl = Number.parseInt(searchParams.get('taskId') || '', 10)
+  const taskIdParam = searchParams.get('taskId') || ''
+  const selectedTaskIdFromUrl = /^\d+$/.test(taskIdParam) && Number.isSafeInteger(Number(taskIdParam)) && Number(taskIdParam) > 0 ? Number(taskIdParam) : null
+  const taskDeepLink = useTaskDeepLink({
+    taskId: selectedTaskIdFromUrl,
+    scopeKey: `${currentUser?.id ?? ''}:${currentUser?.workspace_id ?? ''}:${activeTenant?.id ?? ''}`,
+    loading,
+    setSelectedTask,
+  })
 
   const updateTaskUrl = useCallback((taskId: number | null, mode: 'push' | 'replace' = 'push') => {
     const params = new URLSearchParams(searchParams.toString())
@@ -534,26 +542,6 @@ export function TaskBoardPanel() {
     const newFilter = activeProject ? String(activeProject.id) : 'all'
     setProjectFilter(newFilter)
   }, [activeProject])
-
-  useEffect(() => {
-    if (!Number.isFinite(selectedTaskIdFromUrl)) {
-      if (selectedTask) setSelectedTask(null)
-      return
-    }
-
-    const match = tasks.find((task) => task.id === selectedTaskIdFromUrl)
-    if (match) {
-      if (selectedTask?.id !== match.id) {
-        setSelectedTask(match)
-      }
-      return
-    }
-
-    if (!loading) {
-      setError(`Task #${selectedTaskIdFromUrl} not found in current workspace`)
-      setSelectedTask(null)
-    }
-  }, [loading, selectedTask, selectedTaskIdFromUrl, setSelectedTask, tasks])
 
   // Poll as SSE fallback — pauses when SSE is delivering events
   useSmartPoll(fetchData, 30000, { pauseWhenSseConnected: true })
@@ -918,13 +906,16 @@ export function TaskBoardPanel() {
       )}
 
       {/* Error Display */}
-      {error && (
+      {(error || taskDeepLink.error) && (
         <div role="alert" className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 m-4 rounded-lg text-sm flex items-center justify-between">
-          <span>{error}</span>
+          <span>{error || taskDeepLink.error}</span>
           <Button
             variant="ghost"
             size="icon-xs"
-            onClick={() => setError(null)}
+            onClick={() => {
+              setError(null)
+              if (taskDeepLink.error) updateTaskUrl(null, 'replace')
+            }}
             className="text-red-400/60 hover:text-red-400 ml-2"
             aria-label={t('dismissError')}
           >
@@ -1147,7 +1138,7 @@ export function TaskBoardPanel() {
       <HermesCronSection />
 
       {/* Task Detail Modal */}
-      {selectedTask && !editingTask && (
+      {selectedTask && selectedTask.id === selectedTaskIdFromUrl && taskDeepLink.ready && !editingTask && (
         <TaskDetailModal
           task={selectedTask}
           agents={agents}

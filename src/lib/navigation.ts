@@ -6,11 +6,12 @@ import { startNavigationTiming } from '@/lib/navigation-metrics'
 import { useMissionControl } from '@/store'
 
 export function panelHref(panel: string): string {
-  return panel === 'overview' ? '/' : `/${panel}`
+  return panel === 'headquarters' ? '/' : `/${panel}`
 }
 
 const PREFETCHED_ROUTES = new Set<string>()
 const DEFAULT_PREFETCH_PANELS = [
+  'headquarters',
   'overview',
   'chat',
   'tasks',
