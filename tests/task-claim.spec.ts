@@ -148,7 +148,7 @@ test.describe('Task Claim API', () => {
     expect(res.status()).toBe(409)
   })
 
-  test('after release, ticket can be re-claimed', async ({ request }) => {
+  test('after release, a plain re-claim is rejected with 409', async ({ request }) => {
     const { id } = await createTestTask(request)
     cleanup.push(id)
 
@@ -161,9 +161,11 @@ test.describe('Task Claim API', () => {
       data: { agent: 'reidar' },
     })
 
-    // Released is a terminal state from the agent's perspective — only requeue
-    // back to Unclaimed allows a fresh claim. Confirm 409 first, then requeue
-    // is rejected (Released is not Claimed/Running).
+    // Released is not claimable and requeue only accepts Claimed/Running, so a
+    // released ticket stays parked. This test proves only the 409 — it does not
+    // prove reactivation. The supported way back is
+    // POST /api/tasks/[id]/resume-review (docs/task-review-resume.md), covered
+    // by src/lib/__tests__/task-review-resume.test.ts.
     const reclaim = await request.post(`/api/tasks/${id}/claim`, {
       headers: API_KEY_HEADER,
       data: { agent: 'stella' },
