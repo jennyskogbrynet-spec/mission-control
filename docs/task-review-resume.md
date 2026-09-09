@@ -49,11 +49,20 @@ canonical local controller journal itself:
 ~/.openclaw/workspace/skills/babysential-backlog-orchestrator/.state/runs/*.json
 ```
 
+Two receipt roots are trusted, both fixed:
+
+```
+~/tmp                                                  legacy receipts and host observations
+~/.openclaw/state/babysential-codex-review/perPR       native Codex review receipts
+```
+
 Roots are fixed at runtime and injectable **only** from tests
 (`reconcileNativeTerminalEvidence(request, deps)` in `src/lib/task-review-resume.ts`);
-a request can never choose a path. Reading is bounded: at most 400 journal
-files, 512 KB per file, regular files only, symlinks rejected and every
-resolved path must stay inside its trusted root.
+a request can never choose a path, and there is no environment override.
+Reading is bounded: at most 400 journal files, 512 KB per file, including native request/result metadata,
+raw file buffers are hashed before decoding, malformed UTF-8 is rejected,
+regular files only, symlinks rejected and every resolved path must stay inside
+its trusted root.
 
 Resume is allowed only when **all** of the following hold:
 
@@ -73,6 +82,105 @@ Resume is allowed only when **all** of the following hold:
 A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved;
 resume does not require the review to have passed. Old terminal receipts are
 accepted regardless of age.
+
+## Receipt shapes
+
+Three receipt shapes are accepted. The shape is chosen by discriminator, never
+by trial: if a receipt carries the native host-observation `kind`, `nativeResultRef`, `native` or
+`requestSha256`, it is committed to the strict native reader. A malformed
+native receipt is rejected — it never falls back to the lax flat matcher.
+
+### 1. Flat Claude receipt (legacy, unchanged)
+
+`{ status, exitCode, sessionId?, sessionRef? }` under `~/tmp`. Rules are exactly
+as before: `completed` ⇒ `exitCode 0`, every supplied identity field must agree,
+and `completed ⇒ exit 0` was **not** loosened for these.
+
+### 2. Raw native Codex result (MC1304 shape)
+
+The controller points `receiptRef` straight at the immutable
+
+```
+<perPR>/<positive PR number>/<canonical lowercase uuid>/result.json
+```
+
+with its sibling `request.json`. The layout is strict: exactly that depth, that
+filename, a numeric PR directory and a canonical UUID run directory, all inside
+the fixed native root. A raw result found anywhere else is not trusted, and a
+flat receipt found *inside* the native root is rejected.
+
+All of the following must hold:
+
+- `sha256(raw request.json bytes) == result.requestSha256`
+- `request.runId == result.runId == <uuid directory>`
+- `request.candidate.prNumber == <PR directory>`
+- `request.taskRef == "MC:<taskId>"` for the task being resumed
+- `native.requestedModel == native.observedModel == request.model`, and the
+  journal's every supplied route/dispatch model when recorded; supplied account IDs must also match
+- `native.accountBefore/accountAfter.emailHash == request.expectedEmailHash`,
+  both account records are required with type `chatgpt`, and the account did not change during the run
+- `native.sourceThreadId == native.reviewThreadId == native.terminal.threadId`,
+  and the registered worker `sessionRef` binds that thread id
+- `native.turnId == native.terminal.turn.id`, the notification is exactly `turn/completed`, mechanism is `turn/start+outputSchema`, the turn status is terminal, and
+  a `completed` run requires a `completed` turn
+- `native.childExit.observed == true`, an integer `code`, `signal == null`
+- `native.status` is terminal and equals the journal worker's status;
+  `completed` requires child exit `0`
+- `native.errorCode == null` and the run did not leave review mode
+- `gitBefore`/`gitAfter` are clean and equal `request.candidate.headSha/treeSha`;
+  `baseSha`, `treeSha`, `policyCommit` and `policySha256` must be well formed
+- `native.decision == native.review.decision`, recorded verbatim
+
+### 3. Derived host observation (MC1305 shape)
+
+A summary under `~/tmp` with
+`kind: "host_observation_of_native_release_review"`. It is a convenience
+pointer, not evidence. Exactly one `nativeResultRef` is followed, it must
+resolve to a raw native result inside the fixed native root, and every field
+the observation copies is re-verified against the authoritative
+request/result pair: `runId`, `pr`, `task`, `headSha`, `decision`, `status` and
+`sessionRef`. Chained observations, pointers outside the native root and
+traversal paths are refused. There is no generic auto-adapter and no recursive
+following.
+
+Its `exitCode` is the **wrapper's decision exit** — the release CLI exits
+non-zero on HOLD. It is recorded as `wrapper_exit_code`/`wrapper_exit_meaning`
+and never substituted for the native child exit.
+
+## What the evidence means
+
+For native receipts each reconciled worker gains an optional, path-free
+`native` block alongside the existing `ReconciledWorker` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `evidence_kind` | `native_result` or `host_observation_of_native_release_review` |
+| `native_status` | the native run's own terminal status |
+| `child_exit_code` / `child_exit_signal` | the **observed** exit of the reviewer child process |
+| `wrapper_exit_code` / `wrapper_exit_meaning` | the wrapper CLI's decision exit, `null` for a raw result |
+| `review_decision` | the review verdict, e.g. `hold`, copied verbatim |
+| `native_run_id`, `pr_number`, `head_sha`, `task_ref` | the candidate the run was bound to |
+| `observed_model`, `thread_id`, `turn_id` | reviewer identity |
+| `request_sha256` | SHA-256 of the raw `request.json` bytes, verified |
+| `result_digest` / `wrapper_digest` | SHA-256 of the raw source / wrapper bytes |
+
+`receipt_exit_code` keeps its existing meaning — the exit that proves *this
+worker's* process ended — so for native receipts it is the child exit.
+`receipt_status` is the native status and `receipt_digest` remains SHA-256 of
+canonical parsed JSON of the receipt the journal referenced. `receipt_refs` may
+contain two entries for one worker when an observation was followed: the
+observation and the authoritative result it was checked against.
+
+**Limits.** Three facts are deliberately kept apart and none implies another:
+the review *decision*, the wrapper CLI *gate exit*, and the native *process*
+completion. Resume proves only the third. A HOLD stays a HOLD: it is preserved
+in the audit and this endpoint never converts it to a pass, never approves a
+release and never re-runs a review. Nothing in the source receipts, the
+`request.json`/`result.json` pair or the controller journal is rewritten,
+repaired or normalized — they are read-only inputs. The reconciler proves that
+recorded workers stopped; it does not supervise unregistered processes, and
+`operationalEvents`/`droppedEventCount` are not interpreted. A `result.json`
+larger than 512 KB fails closed rather than being read partially.
 
 `evidence_code` values: `workspace_not_supported`, `evidence_unavailable`,
 `evidence_unreadable`, `scope_mismatch`, `worker_not_terminal`,

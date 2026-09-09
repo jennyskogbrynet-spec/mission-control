@@ -1,6 +1,7 @@
 // @vitest-environment node
 import Database from 'better-sqlite3'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, renameSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { NextRequest } from 'next/server'
@@ -10,7 +11,7 @@ const mock = vi.hoisted(() => ({
   db: null as any,
   user: { username: 'martin', workspace_id: 1, role: 'operator' } as Record<string, unknown>,
   broadcast: vi.fn(),
-  roots: { journalRoot: '', receiptRoots: [] as string[] },
+  roots: { journalRoot: '', receiptRoots: [] as string[], nativeReviewRoot: '' },
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: () => mock.db }))
@@ -31,6 +32,7 @@ vi.mock('@/lib/task-review-resume', async () => {
       actual.reconcileNativeTerminalEvidence(request, {
         journalRoot: mock.roots.journalRoot,
         receiptRoots: mock.roots.receiptRoots,
+        nativeReviewRoot: mock.roots.nativeReviewRoot,
       }),
   }
 })
@@ -44,6 +46,7 @@ const PRIOR_METADATA = {
 }
 
 let root = ''
+let nativeRoot = ''
 
 function receipt(name: string, body: Record<string, unknown>): string {
   const file = path.join(root, 'receipts', `${name}.json`)
@@ -83,6 +86,160 @@ function worker(
     sessionRef: `claude-code:${session}`,
     receiptRef,
   }
+}
+
+/**
+ * Structurally actual native Codex review identifiers, taken from the sanitized
+ * MC1304 request/result pair. Account identity is a synthetic hash.
+ */
+const NATIVE = {
+  runId: '6807bc77-4193-4490-b16a-370b81e5cc67',
+  pr: 436,
+  threadId: '01a08637-2625-7303-a89d-d8ca60674696',
+  turnId: '01a08637-26fb-7af1-9c22-a373a06a96a4',
+  baseSha: '1a430a885d49a86b0d01362f82d41a2bd856737f',
+  headSha: 'd733d3420ab0301161c4b32058cf42c5c2f28ad5',
+  treeSha: '355dcf660d9a022904cb30ffb28e274b13a7cc8c',
+  policySha256: 'd9efa3ed9662a6d72c591b8e634beb38636d30d8de8bcb750c5795a22d3b44b6',
+  packetSha256: '67462074e17d39319c205ef7831f152a0d333f418d1b5030d8643cf046bdcd79',
+  emailHash: 'a'.repeat(64),
+  model: 'gpt-6-astra',
+  session: 'codex:01a08637-2625-7303-a89d-d8ca60674696',
+}
+
+function nativeRequestBody(pr: number, runId: string) {
+  return {
+    schemaVersion: 1,
+    runId,
+    candidate: {
+      repo: 'jennyskogbrynet-spec/babysential',
+      prNumber: pr,
+      baseSha: NATIVE.baseSha,
+      headSha: NATIVE.headSha,
+      treeSha: NATIVE.treeSha,
+      policyCommit: NATIVE.baseSha,
+      policySha256: NATIVE.policySha256,
+    },
+    taskRef: `MC:${TASK_ID}`,
+    authorSessionIds: ['claude-code:02b932a0-6f6e-4455-81a6-26937cd59f86'],
+    accountId: 'fixture-account',
+    expectedEmailHash: NATIVE.emailHash,
+    model: NATIVE.model,
+    packetSha256: NATIVE.packetSha256,
+    createdAt: '2026-09-09T12:49:15.535Z',
+  }
+}
+
+/** A completed native turn whose review decision is HOLD and whose child exited 0. */
+function nativeBody() {
+  return {
+    mechanism: 'turn/start+outputSchema',
+    status: 'completed',
+    decision: 'hold',
+    review: { decision: 'hold', summary: 'Acceptance artifacts are missing.', findings: [] },
+    requestedModel: NATIVE.model,
+    observedModel: NATIVE.model,
+    accountBefore: { type: 'chatgpt', emailHash: NATIVE.emailHash, planType: 'pro' },
+    accountAfter: { type: 'chatgpt', emailHash: NATIVE.emailHash, planType: 'pro' },
+    sourceThreadId: NATIVE.threadId,
+    reviewThreadId: NATIVE.threadId,
+    turnId: NATIVE.turnId,
+    terminal: {
+      method: 'turn/completed',
+      threadId: NATIVE.threadId,
+      turn: { id: NATIVE.turnId, status: 'completed', startedAt: 1788958156, completedAt: 1788958342 },
+    },
+    exitedReviewMode: null,
+    childExit: { observed: true, code: 0, signal: null },
+    errorCode: null,
+    operationalEvents: [],
+    droppedEventCount: 0,
+    outputBytes: 454555,
+  }
+}
+
+interface NativeRunOptions {
+  pr?: number
+  runId?: string
+  dir?: string
+  request?: Record<string, unknown>
+  result?: Record<string, unknown>
+  native?: Record<string, unknown>
+  /** Written verbatim instead of the digest of the actual request bytes. */
+  requestSha256?: string
+}
+
+/** Writes `<perPR>/<pr>/<runId>/{request,result}.json` and returns the result path. */
+function nativeRun(options: NativeRunOptions = {}): string {
+  const pr = options.pr ?? NATIVE.pr
+  const runId = options.runId ?? NATIVE.runId
+  const dir = options.dir ?? path.join(nativeRoot, String(pr), runId)
+  mkdirSync(dir, { recursive: true })
+
+  const request = { ...nativeRequestBody(pr, runId), ...(options.request ?? {}) }
+  const rawRequest = JSON.stringify(request)
+  writeFileSync(path.join(dir, 'request.json'), rawRequest)
+
+  const result = {
+    schemaVersion: 1,
+    runId,
+    requestSha256:
+      options.requestSha256 ?? createHash('sha256').update(rawRequest, 'utf8').digest('hex'),
+    completedAt: '2026-09-09T12:52:22.638Z',
+    native: { ...nativeBody(), ...(options.native ?? {}) },
+    gitBefore: { headSha: NATIVE.headSha, treeSha: NATIVE.treeSha, dirty: false },
+    gitAfter: { headSha: NATIVE.headSha, treeSha: NATIVE.treeSha, dirty: false },
+    ...(options.result ?? {}),
+  }
+  const resultPath = path.join(dir, 'result.json')
+  writeFileSync(resultPath, JSON.stringify(result))
+  return resultPath
+}
+
+/** Mirrors the derived host_observation_of_native_release_review summary under ~/tmp. */
+function hostObservation(name: string, overrides: Record<string, unknown> = {}, resultRef?: string) {
+  return receipt(name, {
+    schemaVersion: 1,
+    kind: 'host_observation_of_native_release_review',
+    note: 'Integrator host observation; the wrapper result is the authoritative native receipt.',
+    status: 'completed',
+    // The wrapper CLI exits non-zero on HOLD. This is a decision exit.
+    exitCode: 1,
+    exitCodeMeaning: 'wrapper exits non-zero on HOLD; the native turn completed',
+    sessionRef: NATIVE.session,
+    decision: 'hold',
+    runId: NATIVE.runId,
+    nativeResultRef:
+      resultRef ?? path.join(nativeRoot, String(NATIVE.pr), NATIVE.runId, 'result.json'),
+    pr: NATIVE.pr,
+    task: TASK_ID,
+    headSha: NATIVE.headSha,
+    observedAt: '2026-09-09T13:43:34.664Z',
+    ...overrides,
+  })
+}
+
+/** A native reviewer registered on a codex session rather than a Claude session. */
+function codexWorker(receiptRef: string, status = 'completed', sessionRef = NATIVE.session) {
+  return {
+    workerId: 'w-native-review',
+    taskId: TASK_ID,
+    dispatch: { type: 'dispatch', workerId: 'w-native-review', taskId: TASK_ID, phase: 'review' },
+    route: { bindingId: 'codex-native', runtimeId: 'codex', model: NATIVE.model },
+    status,
+    deadlineAt: 1788889056.340105,
+    sessionRef,
+    receiptRef,
+  }
+}
+
+function nativeJournal(receiptRef: string, status = 'completed', sessionRef = NATIVE.session) {
+  journal('001-run', {
+    id: '2fb27d2d-6d6c-41eb-9e8d-7308b6057867',
+    projectId: PROJECT_ID,
+    workspaceId: null,
+    workers: [codexWorker(receiptRef, status, sessionRef)],
+  })
 }
 
 function journal(name: string, body: Record<string, unknown>) {
@@ -174,10 +331,19 @@ describe('POST /api/tasks/[id]/resume-review', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mock.user = { username: 'martin', workspace_id: 1, role: 'operator' }
-    root = mkdtempSync(path.join(tmpdir(), 'mc1308-'))
+    // Resolved up front so recorded receipt refs compare exactly on macOS,
+    // where the temp dir is itself a symlink.
+    root = realpathSync(mkdtempSync(path.join(tmpdir(), 'mc1308-')))
     mkdirSync(path.join(root, 'runs'))
     mkdirSync(path.join(root, 'receipts'))
-    mock.roots = { journalRoot: path.join(root, 'runs'), receiptRoots: [root] }
+    // Mirrors ~/.openclaw/state/babysential-codex-review/perPR; test-injected only.
+    nativeRoot = path.join(root, 'codex-review', 'perPR')
+    mkdirSync(nativeRoot, { recursive: true })
+    mock.roots = {
+      journalRoot: path.join(root, 'runs'),
+      receiptRoots: [path.join(root, 'receipts')],
+      nativeReviewRoot: nativeRoot,
+    }
 
     mock.db = new Database(':memory:')
     mock.db.exec(`
@@ -523,5 +689,426 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       .prepare(`SELECT COUNT(*) AS n FROM activities WHERE entity_id = ?`)
       .get(TASK_ID) as { n: number }
     expect(audits.n).toBe(1)
+  })
+
+  // MC1320: the native Codex reviewer writes an immutable nested receipt, and the
+  // integrator writes a derived summary that points at it. Neither may be
+  // rewritten into the older flat shape to make a resume pass.
+  describe('native Codex review receipts', () => {
+    it('accepts the raw native result: HOLD is preserved and the child exit proves completion', async () => {
+      nativeJournal(nativeRun())
+      seedTask()
+
+      const result = await resume({
+        reason: 'MC1304 native reviewer child exited 0; review decision is HOLD',
+        expected_updated_at: 2000,
+      })
+
+      expect(result.status).toBe(200)
+      const [reconciled] = result.body.evidence.workers
+      expect(reconciled.status).toBe('completed')
+      expect(reconciled.receipt_status).toBe('completed')
+      // The proven process exit is the observed native child exit.
+      expect(reconciled.receipt_exit_code).toBe(0)
+      expect(reconciled.native.evidence_kind).toBe('native_result')
+      expect(reconciled.native.child_exit_code).toBe(0)
+      expect(reconciled.native.child_exit_signal).toBeNull()
+      // A raw result has no wrapper decision exit at all.
+      expect(reconciled.native.wrapper_exit_code).toBeNull()
+      // The review decision is carried through untouched; resume never passes it.
+      expect(reconciled.native.review_decision).toBe('hold')
+      expect(reconciled.native.native_run_id).toBe(NATIVE.runId)
+      expect(reconciled.native.pr_number).toBe(NATIVE.pr)
+      expect(reconciled.native.head_sha).toBe(NATIVE.headSha)
+      expect(reconciled.native.task_ref).toBe(`MC:${TASK_ID}`)
+      expect(reconciled.native.observed_model).toBe(NATIVE.model)
+      expect(reconciled.native.thread_id).toBe(NATIVE.threadId)
+      expect(reconciled.native.request_sha256).toMatch(/^[0-9a-f]{64}$/)
+      expect(reconciled.native.result_digest).toMatch(/^[0-9a-f]{64}$/)
+      expect(reconciled.native.wrapper_digest).toBeNull()
+      // The public summary still carries no filesystem path.
+      expect(JSON.stringify(result.body.evidence)).not.toContain(root)
+
+      // The HOLD survives in the durable audit, and prior metadata is preserved.
+      const metadata = JSON.parse(taskRow().metadata)
+      expect(metadata.receipts).toEqual(PRIOR_METADATA.receipts)
+      expect(metadata.history).toEqual(PRIOR_METADATA.history)
+      const stored = metadata.review_resumes[0].evidence
+      expect(stored.workers[0].native.review_decision).toBe('hold')
+      expect(stored.receipt_refs).toEqual([path.join(nativeRoot, '436', NATIVE.runId, 'result.json')])
+
+      // The resumed ticket is actually claimable again.
+      const claimed = await claim('claude-martin-fable')
+      expect(claimed.status).toBe(200)
+      expect(claimed.body.task.claim_state).toBe('Claimed')
+    })
+
+    it('accepts the host observation and keeps the wrapper exit 1 apart from the child exit 0', async () => {
+      const resultRef = nativeRun()
+      nativeJournal(hostObservation('mc1305'))
+      seedTask()
+
+      const result = await resume({
+        reason: 'MC1305 wrapper exited 1 on HOLD; the native child exited 0',
+        expected_updated_at: 2000,
+      })
+
+      expect(result.status).toBe(200)
+      const [reconciled] = result.body.evidence.workers
+      expect(reconciled.native.evidence_kind).toBe('host_observation_of_native_release_review')
+      // The decision exit is recorded, never relabelled as the child exit.
+      expect(reconciled.native.wrapper_exit_code).toBe(1)
+      expect(reconciled.native.wrapper_exit_meaning).toContain('HOLD')
+      expect(reconciled.native.child_exit_code).toBe(0)
+      expect(reconciled.receipt_exit_code).toBe(0)
+      expect(reconciled.native.review_decision).toBe('hold')
+      // Both the wrapper and the authoritative source are digested.
+      expect(reconciled.native.wrapper_digest).toMatch(/^[0-9a-f]{64}$/)
+      expect(reconciled.native.result_digest).toMatch(/^[0-9a-f]{64}$/)
+      expect(reconciled.native.wrapper_digest).not.toBe(reconciled.native.result_digest)
+      expect(JSON.stringify(result.body.evidence)).not.toContain(root)
+
+      // The audit references both the observation and the source it was checked against.
+      const activity = mock.db
+        .prepare(`SELECT data FROM activities WHERE entity_id = ? AND type = 'task_review_resumed'`)
+        .get(TASK_ID) as any
+      expect(JSON.parse(activity.data).evidence.receipt_refs).toEqual([
+        path.join(root, 'receipts', 'mc1305.json'),
+        resultRef,
+      ])
+    })
+
+    it.each<[string, () => void]>([
+      ['altered request bytes that decode to the same replacement character', () => {
+        const ref = nativeRun({ request: { note: '\uFFFD' } }); const requestPath = path.join(path.dirname(ref), 'request.json');
+        const bytes = readFileSync(requestPath); const at = bytes.indexOf(Buffer.from('\uFFFD')); expect(at).toBeGreaterThan(-1);
+        writeFileSync(requestPath, Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 3)])); nativeJournal(ref)
+      }],
+
+      ['native metadata over the original size limit', () => { const ref = nativeRun(); const value = JSON.parse(readFileSync(ref, 'utf8')); value.padding = 'x'.repeat(512001); writeFileSync(ref, JSON.stringify(value)); nativeJournal(ref) }],
+      ['symlinked native root', () => { const ref = nativeRun(); const linked = path.join(root, 'native-link'); symlinkSync(nativeRoot, linked); mock.roots.nativeReviewRoot = linked; nativeJournal(ref) }],
+      ['symlinked native run directory', () => { const ref = nativeRun(); const dir = path.dirname(ref); const actual = dir + '-original'; renameSync(dir, actual); symlinkSync(actual, dir); nativeJournal(ref) }],
+
+      ['missing accountBefore', () => nativeJournal(nativeRun({ native: { accountBefore: undefined } }))],
+      ['null accountAfter', () => nativeJournal(nativeRun({ native: { accountAfter: null } }))],
+      ['wrong account type', () => nativeJournal(nativeRun({ native: { accountBefore: { type: 'apiKey', emailHash: NATIVE.emailHash } } }))],
+      ['wrong native mechanism', () => nativeJournal(nativeRun({ native: { mechanism: 'review/start' } }))],
+      ['nonterminal notification with completed fields', () => nativeJournal(nativeRun({ native: { terminal: { ...nativeBody().terminal, method: 'turn/started' } } }))],
+      ['wrong runtime prefix', () => nativeJournal(nativeRun(), 'completed', 'claude-code:' + NATIVE.threadId)],
+      ['bare native session', () => nativeJournal(nativeRun(), 'completed', NATIVE.threadId)],
+      ['unsupported native decision', () => nativeJournal(nativeRun({ native: { decision: 'approve', review: { decision: 'approve' } } }))],
+      ['registered account mismatch', () => { const ref = nativeRun(); const cw = codexWorker(ref); journal('native', { projectId: PROJECT_ID, workers: [{ ...cw, route: { ...cw.route, accountId: 'another-account' } }] }) }],
+      ['registered modelId mismatch', () => { const ref = nativeRun(); const cw = codexWorker(ref); journal('native', { projectId: PROJECT_ID, workers: [{ ...cw, route: { ...cw.route, modelId: 'wrong-model' } }] }) }],
+      ['registered dispatch model mismatch', () => { const ref = nativeRun(); const cw = codexWorker(ref); journal('native', { projectId: PROJECT_ID, workers: [{ ...cw, dispatch: { ...cw.dispatch, modelId: 'wrong-model' } }] }) }],
+
+      [
+        'completed with a nonzero child exit',
+        () => nativeJournal(nativeRun({ native: { childExit: { observed: true, code: 1, signal: null } } })),
+      ],
+      [
+        'an unobserved child exit',
+        () => nativeJournal(nativeRun({ native: { childExit: { observed: false, code: null, signal: null } } })),
+      ],
+      [
+        'a missing child exit code',
+        () => nativeJournal(nativeRun({ native: { childExit: { observed: true, signal: null } } })),
+      ],
+      [
+        'a signalled child',
+        () => nativeJournal(nativeRun({ native: { childExit: { observed: true, code: 0, signal: 'SIGKILL' } } })),
+      ],
+      [
+        'a native error code',
+        () => nativeJournal(nativeRun({ native: { errorCode: 'stream_disconnected' } })),
+      ],
+      [
+        'a turn that is not terminal',
+        () =>
+          nativeJournal(
+            nativeRun({
+              native: {
+                terminal: {
+                  method: 'turn/started',
+                  threadId: NATIVE.threadId,
+                  turn: { id: NATIVE.turnId, status: 'in_progress' },
+                },
+              },
+            }),
+          ),
+      ],
+      [
+        'a terminal thread that is not the source thread',
+        () =>
+          nativeJournal(
+            nativeRun({
+              native: {
+                terminal: {
+                  method: 'turn/completed',
+                  threadId: '01a08637-2625-7303-a89d-000000000000',
+                  turn: { id: NATIVE.turnId, status: 'completed' },
+                },
+              },
+            }),
+          ),
+      ],
+      [
+        'a request digest that does not cover the raw request bytes',
+        () => nativeJournal(nativeRun({ requestSha256: 'b'.repeat(64) })),
+      ],
+      [
+        'a taskRef for a different MC task',
+        () => nativeJournal(nativeRun({ request: { taskRef: 'MC:9999' } })),
+      ],
+      [
+        'a PR number that contradicts the directory',
+        () =>
+          nativeJournal(
+            nativeRun({ request: { candidate: { ...nativeRequestBody(999, NATIVE.runId).candidate } } }),
+          ),
+      ],
+      [
+        'a runId that contradicts the directory',
+        () => nativeJournal(nativeRun({ result: { runId: '11111111-2222-4333-8444-555555555555' } })),
+      ],
+      [
+        'an observed model the request did not ask for',
+        () => nativeJournal(nativeRun({ native: { observedModel: 'gpt-5-legacy' } })),
+      ],
+      [
+        'an account identity the request did not authorize',
+        () =>
+          nativeJournal(
+            nativeRun({ native: { accountAfter: { type: 'chatgpt', emailHash: 'c'.repeat(64), planType: 'pro' } } }),
+          ),
+      ],
+      [
+        'a session that does not bind the native source thread',
+        () => nativeJournal(nativeRun(), 'completed', 'codex:11111111-2222-4333-8444-555555555555'),
+      ],
+      [
+        'a reviewed head that is not the requested candidate',
+        () =>
+          nativeJournal(
+            nativeRun({ result: { gitAfter: { headSha: 'f'.repeat(40), treeSha: NATIVE.treeSha, dirty: false } } }),
+          ),
+      ],
+      [
+        'a dirty worktree at review time',
+        () =>
+          nativeJournal(
+            nativeRun({ result: { gitBefore: { headSha: NATIVE.headSha, treeSha: NATIVE.treeSha, dirty: true } } }),
+          ),
+      ],
+      [
+        'a decision that contradicts the review decision',
+        () => nativeJournal(nativeRun({ native: { decision: 'pass' } })),
+      ],
+      [
+        'a native status that contradicts the recorded worker status',
+        () => nativeJournal(nativeRun({ native: { status: 'failed' } })),
+      ],
+      [
+        'a malformed native receipt carrying legacy-looking flat fields',
+        () =>
+          nativeJournal(
+            nativeRun({
+              native: { childExit: undefined },
+              result: { status: 'completed', exitCode: 0, sessionId: NATIVE.threadId },
+            }),
+          ),
+      ],
+      [
+        'a native result outside the fixed native review root',
+        () =>
+          nativeJournal(
+            nativeRun({ dir: path.join(root, 'receipts', 'stray', String(NATIVE.pr), NATIVE.runId) }),
+          ),
+      ],
+      [
+        'a native result at the wrong depth inside the native root',
+        () => nativeJournal(nativeRun({ dir: path.join(nativeRoot, String(NATIVE.pr)) })),
+      ],
+      [
+        'a native result under a non-numeric PR directory',
+        () => nativeJournal(nativeRun({ dir: path.join(nativeRoot, 'main', NATIVE.runId) })),
+      ],
+      [
+        'a native result under a run directory that is not a canonical uuid',
+        () => nativeJournal(nativeRun({ dir: path.join(nativeRoot, String(NATIVE.pr), 'latest') })),
+      ],
+      [
+        'an observation whose decision upgrades the native HOLD',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('upgraded', { decision: 'pass' }))
+        },
+      ],
+      [
+        'an observation whose status contradicts the native status',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('status-drift', { status: 'failed' }))
+        },
+      ],
+      [
+        'an observation bound to a different task',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('other-task', { task: 9999 }))
+        },
+      ],
+      [
+        'an observation bound to a different head',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('other-head', { headSha: 'e'.repeat(40) }))
+        },
+      ],
+      [
+        'an observation whose session is not the registered worker session',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('other-session', { sessionRef: 'codex:11111111-2222-4333-8444-555555555555' }))
+        },
+      ],
+      [
+        'an observation with no exitCodeMeaning',
+        () => {
+          nativeRun()
+          nativeJournal(hostObservation('no-meaning', { exitCodeMeaning: '' }))
+        },
+      ],
+      [
+        'an observation pointing outside the native review root',
+        () => {
+          nativeRun()
+          const outside = receipt('planted-result', { schemaVersion: 1, native: nativeBody() })
+          nativeJournal(hostObservation('escaping', {}, outside))
+        },
+      ],
+      [
+        // Exactly one pointer is followed, and its target must be a raw result.
+        'an observation chained through a second observation inside the native root',
+        () => {
+          nativeRun()
+          const chainedRunId = '11111111-2222-4333-8444-555555555555'
+          const chainedDir = path.join(nativeRoot, String(NATIVE.pr), chainedRunId)
+          mkdirSync(chainedDir, { recursive: true })
+          const chained = path.join(chainedDir, 'result.json')
+          writeFileSync(
+            chained,
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: 'host_observation_of_native_release_review',
+              status: 'completed',
+              exitCode: 1,
+              exitCodeMeaning: 'wrapper exits non-zero on HOLD',
+              sessionRef: NATIVE.session,
+              decision: 'hold',
+              runId: chainedRunId,
+              nativeResultRef: path.join(nativeRoot, String(NATIVE.pr), NATIVE.runId, 'result.json'),
+              pr: NATIVE.pr,
+              task: TASK_ID,
+              headSha: NATIVE.headSha,
+            }),
+          )
+          nativeJournal(hostObservation('outer', {}, chained))
+        },
+      ],
+      [
+        'an observation using a traversal path into the native root',
+        () => {
+          nativeRun()
+          nativeJournal(
+            hostObservation(
+              'traversal',
+              {},
+              [nativeRoot, String(NATIVE.pr), '..', String(NATIVE.pr), NATIVE.runId, 'result.json'].join(path.sep),
+            ),
+          )
+        },
+      ],
+    ])('rejects %s without mutating the task', async (_label, arrange) => {
+      arrange()
+      seedTask()
+
+      const result = await resume({ reason: 'native evidence check', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(409)
+      expect(result.body.evidence_code).toBe('receipt_mismatch')
+      expect(JSON.stringify(result.body)).not.toContain(root)
+      expect(taskRow().claim_state).toBe('Released')
+      expect(taskRow().updated_at).toBe(2000)
+      expect(mock.db.prepare('SELECT count(*) n FROM activities').get()).toEqual({ n: 0 })
+    })
+
+    it('rejects a flat legacy receipt planted inside the native review root', async () => {
+      const dir = path.join(nativeRoot, String(NATIVE.pr), NATIVE.runId)
+      mkdirSync(dir, { recursive: true })
+      const planted = path.join(dir, 'result.json')
+      writeFileSync(
+        planted,
+        JSON.stringify({ status: 'completed', exitCode: 0, sessionRef: NATIVE.session }),
+      )
+      nativeJournal(planted)
+      seedTask()
+
+      const result = await resume({ reason: 'planted flat receipt', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(409)
+      expect(result.body.evidence_code).toBe('receipt_mismatch')
+      expect(taskRow().claim_state).toBe('Released')
+    })
+
+    it('rejects a symlinked native result rather than following it', async () => {
+      const real = nativeRun({ pr: 999 })
+      const dir = path.join(nativeRoot, String(NATIVE.pr), NATIVE.runId)
+      mkdirSync(dir, { recursive: true })
+      const linked = path.join(dir, 'result.json')
+      symlinkSync(real, linked)
+      nativeJournal(linked)
+      seedTask()
+
+      expect((await resume({ reason: 'symlinked native result', expected_updated_at: 2000 })).body.evidence_code).toBe(
+        'receipt_mismatch',
+      )
+      expect(taskRow().claim_state).toBe('Released')
+    })
+
+    it('still blocks when a later journal shows a live worker for the same task', async () => {
+      nativeJournal(nativeRun())
+      journal('002-later-run', {
+        id: 'later-run',
+        projectId: PROJECT_ID,
+        workspaceId: null,
+        workers: [worker('w-review-3', 'review', 'running', 'sess-review-3', null)],
+      })
+      seedTask()
+
+      const result = await resume({ reason: 'later live worker', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(409)
+      expect(result.body.evidence_code).toBe('worker_not_terminal')
+      expect(taskRow().claim_state).toBe('Released')
+    })
+
+    it('reconciles a native reviewer alongside older flat Claude workers in the same journal', async () => {
+      journal('001-run', {
+        id: '2fb27d2d-6d6c-41eb-9e8d-7308b6057867',
+        projectId: PROJECT_ID,
+        workspaceId: null,
+        workers: [
+          worker('w-impl-1', 'implementation', 'completed', 'sess-impl-1', terminalReceipt('impl-1', 'sess-impl-1')),
+          codexWorker(nativeRun()),
+        ],
+      })
+      seedTask()
+
+      const result = await resume({ reason: 'mixed legacy and native', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(200)
+      const kinds = result.body.evidence.workers.map((w: any) => w.native?.evidence_kind ?? 'legacy_flat')
+      expect(kinds.sort()).toEqual(['legacy_flat', 'native_result'])
+    })
   })
 })
