@@ -1,7 +1,15 @@
 // @vitest-environment node
 import Database from 'better-sqlite3'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { NextRequest } from 'next/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -523,5 +531,188 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       .prepare(`SELECT COUNT(*) AS n FROM activities WHERE entity_id = ?`)
       .get(TASK_ID) as { n: number }
     expect(audits.n).toBe(1)
+  })
+})
+
+/**
+ * Evidence lives in a directory called `tmp`, which every disk sweep is entitled
+ * to treat as disposable. `MC_EVIDENCE_ROOT` names a durable second root so the
+ * receipts can be moved out and stay reachable through a `~/tmp` symlink.
+ *
+ * The configured root is additive and containment is still checked on the
+ * resolved path, so this widens where evidence may live without widening what
+ * counts as proof: a receipt outside every root is still refused.
+ */
+describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
+  let actual: typeof import('../task-review-resume')
+  let scratch = ''
+  const savedEnv = process.env.MC_EVIDENCE_ROOT
+  const tmpRoot = path.join(homedir(), 'tmp')
+  const request = { taskId: 999, projectId: 2, workspaceId: 1 }
+
+  function journalRootWith(receiptRef: string) {
+    const runs = mkdtempSync(path.join(tmpdir(), 'mc-evidence-runs-'))
+    writeFileSync(
+      path.join(runs, 'run.json'),
+      JSON.stringify({
+        id: 'run-1',
+        projectId: 2,
+        workspaceId: null,
+        workers: [
+          {
+            workerId: 'w-one',
+            taskId: 999,
+            dispatch: { phase: 'review' },
+            status: 'completed',
+            sessionRef: 'claude-code:sess-one',
+            receiptRef,
+          },
+        ],
+      }),
+    )
+    return runs
+  }
+
+  beforeEach(async () => {
+    actual = await vi.importActual<typeof import('../task-review-resume')>('../task-review-resume')
+    // Under $HOME on purpose: a trusted root is only accepted there, so a
+    // scratch dir in the system temp root could no longer stand in for one.
+    scratch = mkdtempSync(path.join(homedir(), '.mc-evidence-root-test-'))
+    delete process.env.MC_EVIDENCE_ROOT
+  })
+
+  afterEach(() => {
+    rmSync(scratch, { recursive: true, force: true })
+    if (savedEnv === undefined) delete process.env.MC_EVIDENCE_ROOT
+    else process.env.MC_EVIDENCE_ROOT = savedEnv
+  })
+
+  it('leaves the ~/tmp receipt root untouched when the variable is unset', () => {
+    const deps = actual.defaultResumeEvidenceDeps()
+    expect(deps.receiptRoots).toEqual([tmpRoot])
+    expect(deps.journalRoot).toContain('babysential-backlog-orchestrator')
+  })
+
+  it('adds a configured evidence root without dropping ~/tmp', () => {
+    process.env.MC_EVIDENCE_ROOT = scratch
+    expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot, scratch])
+  })
+
+  it('accepts a receipt reached through a symlink into the configured root', () => {
+    // Exactly the shape an evidence migration leaves behind: the receipt file
+    // now lives in the durable root, and the recorded receiptRef still points at
+    // the old tmp-style path, which has become a symlink.
+    const evidence = path.join(scratch, 'evidence')
+    const tmpLike = path.join(scratch, 'tmp-like')
+    mkdirSync(path.join(evidence, 'run-42'), { recursive: true })
+    mkdirSync(tmpLike)
+    writeFileSync(
+      path.join(evidence, 'run-42', 'native-terminal.json'),
+      JSON.stringify({ status: 'completed', exitCode: 0, sessionId: 'sess-one' }),
+    )
+    symlinkSync(path.join(evidence, 'run-42'), path.join(tmpLike, 'run-42'))
+
+    const runs = journalRootWith(path.join(tmpLike, 'run-42', 'native-terminal.json'))
+
+    // Without the evidence root the symlink resolves outside every trusted root.
+    const before = actual.reconcileNativeTerminalEvidence(request, {
+      journalRoot: runs,
+      receiptRoots: [tmpLike],
+    })
+    expect(before.ok).toBe(false)
+    if (!before.ok) expect(before.code).toBe('receipt_mismatch')
+
+    const after = actual.reconcileNativeTerminalEvidence(request, {
+      journalRoot: runs,
+      receiptRoots: [tmpLike, evidence],
+    })
+    expect(after.ok).toBe(true)
+    if (after.ok) expect(after.workers[0].receipt_status).toBe('completed')
+
+    rmSync(runs, { recursive: true, force: true })
+  })
+
+  it('still refuses a receipt outside every root once a root is configured', () => {
+    const evidence = path.join(scratch, 'evidence')
+    mkdirSync(evidence, { recursive: true })
+    process.env.MC_EVIDENCE_ROOT = evidence
+    const stray = path.join(scratch, 'stray.json')
+    writeFileSync(stray, JSON.stringify({ status: 'completed', exitCode: 0, sessionId: 'sess-one' }))
+    const runs = journalRootWith(stray)
+
+    const result = actual.reconcileNativeTerminalEvidence(request, {
+      journalRoot: runs,
+      receiptRoots: actual.defaultResumeEvidenceDeps().receiptRoots,
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('receipt_mismatch')
+    rmSync(runs, { recursive: true, force: true })
+  })
+
+  it('ignores an unusable or over-broad evidence root instead of trusting it', () => {
+    const realHome = realpathSync(homedir())
+    // Real directories, because a root that does not exist is refused for the
+    // wrong reason and would prove nothing about the breadth rule.
+    const madeHere: string[] = []
+    const madeIfPossible = (parent: string, prefix: string): string | null => {
+      try {
+        const dir = mkdtempSync(path.join(realpathSync(parent), prefix))
+        madeHere.push(dir)
+        return dir
+      } catch {
+        return null
+      }
+    }
+    // An ancestor of $HOME (`/Users` here): not the filesystem root, not equal
+    // to $HOME, and strictly wider than $HOME — the gap this test closes.
+    const homeAncestor = path.dirname(realHome)
+    // Inside the disposable root this variable exists to escape.
+    const underHomeTmp = madeIfPossible(tmpRoot, 'mc-evidence-under-home-tmp-')
+    // The system temp root (`/private/tmp` on macOS): outside $HOME, and a
+    // directory any disk sweep is entitled to clear.
+    const underSystemTmp = madeIfPossible('/tmp', 'mc-evidence-under-system-tmp-')
+
+    const values = [
+      '',
+      '   ',
+      'relative/path',
+      path.join(scratch, 'does-not-exist'),
+      `${scratch}/../traversal`,
+      '/',
+      homedir(),
+      realHome,
+      homeAncestor,
+      tmpRoot,
+      underHomeTmp,
+      underSystemTmp,
+    ].filter((value): value is string => value !== null)
+
+    try {
+      for (const value of values) {
+        process.env.MC_EVIDENCE_ROOT = value
+        // Soft, so one run names every value that leaks through rather than
+        // stopping at the first and hiding the rest.
+        expect.soft(actual.defaultResumeEvidenceDeps().receiptRoots, value).toEqual([tmpRoot])
+      }
+    } finally {
+      for (const dir of madeHere) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('trusts a durable root that lies strictly under $HOME', () => {
+    // The same shape as the production value,
+    // $HOME/.openclaw/mission-control/evidence, built inside a scratch home so
+    // the test owns every byte it touches.
+    const canonical = path.join(scratch, '.openclaw', 'mission-control', 'evidence')
+    mkdirSync(canonical, { recursive: true })
+    process.env.MC_EVIDENCE_ROOT = canonical
+    expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot, canonical])
+
+    // And the literal production path, on a machine that already has one.
+    const production = path.join(homedir(), '.openclaw', 'mission-control', 'evidence')
+    if (existsSync(production)) {
+      process.env.MC_EVIDENCE_ROOT = production
+      expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot, production])
+    }
   })
 })
