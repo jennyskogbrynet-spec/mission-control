@@ -7,6 +7,18 @@ hand-written approximations.
 
 Copied and scrubbed by `claude-code/mc-improve-G3` on 2026-09-09.
 
+**Status after the MC1320 integration (2026-09-09).** MC1320's stricter reader
+(`src/lib/native-review-terminal.ts`) validates the authoritative
+`request.json`/`result.json` pair by raw-byte digest and by account identity, so
+a *scrubbed* wrapper receipt can no longer be replayed as passing evidence —
+that is the reader working as designed, not a regression. The versioned-decoder
+tests that consumed these files were therefore dropped when the two
+implementations were merged; `mc1304-native-claude-opus.json` (a flat legacy
+receipt) is still exercised by `task-review-resume-receipts.test.ts`. The rest
+are kept because their provenance below is verified and because the native
+reader's own cases are built from synthetic pairs in
+`task-review-resume.test.ts`, where the digests can be computed honestly.
+
 ## Scrubbing rules applied (identical for every file)
 
 | Field                                                             | Action                                | Why                                                                                                              |

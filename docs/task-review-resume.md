@@ -49,11 +49,23 @@ canonical local controller journal itself:
 ~/.openclaw/workspace/skills/babysential-backlog-orchestrator/.state/runs/*.json
 ```
 
-Roots are fixed at runtime and injectable **only** from tests
-(`reconcileNativeTerminalEvidence(request, deps)` in `src/lib/task-review-resume.ts`);
-a request can never choose a path. Reading is bounded: at most 400 journal
-files, 512 KB per file, regular files only, symlinks rejected and every
-resolved path must stay inside its trusted root.
+Two classes of receipt root are trusted:
+
+```
+~/tmp  (+ MC_EVIDENCE_ROOT, MC_RECEIPT_ROOTS)          legacy receipts and host observations
+~/.openclaw/state/babysential-codex-review/perPR       native Codex review receipts
+```
+
+The native review root is **fixed** — no environment variable widens it, and a
+native result outside it is refused. The legacy roots are the operator's:
+`~/tmp` is always trusted, and `MC_EVIDENCE_ROOT`/`MC_RECEIPT_ROOTS` add durable
+directories under the rule in *Receipt roots* below. Roots are injectable **only**
+from tests (`reconcileNativeTerminalEvidence(request, deps)` in
+`src/lib/task-review-resume.ts`); a request can never choose a path.
+Reading is bounded: at most 400 journal files, 512 KB per file, including native request/result metadata,
+raw file buffers are hashed before decoding, malformed UTF-8 is rejected,
+regular files only, symlinks rejected and every resolved path must stay inside
+its trusted root.
 
 Resume is allowed only when **all** of the following hold:
 
@@ -73,6 +85,105 @@ Resume is allowed only when **all** of the following hold:
 A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved;
 resume does not require the review to have passed. Old terminal receipts are
 accepted regardless of age.
+
+## Receipt shapes
+
+Three receipt shapes are accepted. The shape is chosen by discriminator, never
+by trial: if a receipt carries the native host-observation `kind`, `nativeResultRef`, `native` or
+`requestSha256`, it is committed to the strict native reader. A malformed
+native receipt is rejected — it never falls back to the lax flat matcher.
+
+### 1. Flat Claude receipt (legacy, unchanged)
+
+`{ status, exitCode, sessionId?, sessionRef? }` under `~/tmp`. Rules are exactly
+as before: `completed` ⇒ `exitCode 0`, every supplied identity field must agree,
+and `completed ⇒ exit 0` was **not** loosened for these.
+
+### 2. Raw native Codex result (MC1304 shape)
+
+The controller points `receiptRef` straight at the immutable
+
+```
+<perPR>/<positive PR number>/<canonical lowercase uuid>/result.json
+```
+
+with its sibling `request.json`. The layout is strict: exactly that depth, that
+filename, a numeric PR directory and a canonical UUID run directory, all inside
+the fixed native root. A raw result found anywhere else is not trusted, and a
+flat receipt found *inside* the native root is rejected.
+
+All of the following must hold:
+
+- `sha256(raw request.json bytes) == result.requestSha256`
+- `request.runId == result.runId == <uuid directory>`
+- `request.candidate.prNumber == <PR directory>`
+- `request.taskRef == "MC:<taskId>"` for the task being resumed
+- `native.requestedModel == native.observedModel == request.model`, and the
+  journal's every supplied route/dispatch model when recorded; supplied account IDs must also match
+- `native.accountBefore/accountAfter.emailHash == request.expectedEmailHash`,
+  both account records are required with type `chatgpt`, and the account did not change during the run
+- `native.sourceThreadId == native.reviewThreadId == native.terminal.threadId`,
+  and the registered worker `sessionRef` binds that thread id
+- `native.turnId == native.terminal.turn.id`, the notification is exactly `turn/completed`, mechanism is `turn/start+outputSchema`, the turn status is terminal, and
+  a `completed` run requires a `completed` turn
+- `native.childExit.observed == true`, an integer `code`, `signal == null`
+- `native.status` is terminal and equals the journal worker's status;
+  `completed` requires child exit `0`
+- `native.errorCode == null` and the run did not leave review mode
+- `gitBefore`/`gitAfter` are clean and equal `request.candidate.headSha/treeSha`;
+  `baseSha`, `treeSha`, `policyCommit` and `policySha256` must be well formed
+- `native.decision == native.review.decision`, recorded verbatim
+
+### 3. Derived host observation (MC1305 shape)
+
+A summary under `~/tmp` with
+`kind: "host_observation_of_native_release_review"`. It is a convenience
+pointer, not evidence. Exactly one `nativeResultRef` is followed, it must
+resolve to a raw native result inside the fixed native root, and every field
+the observation copies is re-verified against the authoritative
+request/result pair: `runId`, `pr`, `task`, `headSha`, `decision`, `status` and
+`sessionRef`. Chained observations, pointers outside the native root and
+traversal paths are refused. There is no generic auto-adapter and no recursive
+following.
+
+Its `exitCode` is the **wrapper's decision exit** — the release CLI exits
+non-zero on HOLD. It is recorded as `wrapper_exit_code`/`wrapper_exit_meaning`
+and never substituted for the native child exit.
+
+## What the evidence means
+
+For native receipts each reconciled worker gains an optional, path-free
+`native` block alongside the existing `ReconciledWorker` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `evidence_kind` | `native_result` or `host_observation_of_native_release_review` |
+| `native_status` | the native run's own terminal status |
+| `child_exit_code` / `child_exit_signal` | the **observed** exit of the reviewer child process |
+| `wrapper_exit_code` / `wrapper_exit_meaning` | the wrapper CLI's decision exit, `null` for a raw result |
+| `review_decision` | the review verdict, e.g. `hold`, copied verbatim |
+| `native_run_id`, `pr_number`, `head_sha`, `task_ref` | the candidate the run was bound to |
+| `observed_model`, `thread_id`, `turn_id` | reviewer identity |
+| `request_sha256` | SHA-256 of the raw `request.json` bytes, verified |
+| `result_digest` / `wrapper_digest` | SHA-256 of the raw source / wrapper bytes |
+
+`receipt_exit_code` keeps its existing meaning — the exit that proves *this
+worker's* process ended — so for native receipts it is the child exit.
+`receipt_status` is the native status and `receipt_digest` remains SHA-256 of
+canonical parsed JSON of the receipt the journal referenced. `receipt_refs` may
+contain two entries for one worker when an observation was followed: the
+observation and the authoritative result it was checked against.
+
+**Limits.** Three facts are deliberately kept apart and none implies another:
+the review *decision*, the wrapper CLI *gate exit*, and the native *process*
+completion. Resume proves only the third. A HOLD stays a HOLD: it is preserved
+in the audit and this endpoint never converts it to a pass, never approves a
+release and never re-runs a review. Nothing in the source receipts, the
+`request.json`/`result.json` pair or the controller journal is rewritten,
+repaired or normalized — they are read-only inputs. The reconciler proves that
+recorded workers stopped; it does not supervise unregistered processes, and
+`operationalEvents`/`droppedEventCount` are not interpreted. A `result.json`
+larger than 512 KB fails closed rather than being read partially.
 
 `evidence_code` values: `workspace_not_supported`, `evidence_unavailable`,
 `evidence_unreadable`, `scope_mismatch`, `worker_not_terminal`,
@@ -99,37 +210,17 @@ trusted root, but a receipt file that is itself a symlink is refused.
 
 ### Receipt formats
 
-One decoder distinguishes two kinds before applying the terminal proof rules:
-
-- With no `schemaVersion` field, a receipt is `native`. Its existing top-level
-  `status`, integer `exitCode` and `sessionRef`/`sessionId` rules are unchanged.
-- With numeric `schemaVersion: 1`, a receipt is `wrapper`. An inline `native`
-  object supplies the status, decision, `sourceThreadId` and child exit. A host
-  observation instead supplies top-level status, wrapper exit, decision and
-  session reference, plus `nativeResultRef`. That reference is read with the
-  same roots, file-size bound, symlink refusal and resolved containment check.
-  It must decode directly as a version 1 wrapper with an inline native result;
-  another host observation or an unversioned native receipt is refused.
-- Any present `schemaVersion` other than numeric `1` is refused with
-  `receipt_mismatch`; the server log detail names the unsupported version.
-
-A wrapper needs a terminal status matching the journal worker and matching
-session identity. A full `sessionRef` must equal the journal reference; a bare
-`sourceThreadId` must match its `:`-prefixed suffix. At least one identity is
-required, and every supplied identity must agree. Referenced native evidence
-must independently match the journal session. The native status must be
-terminal and equal the wrapper status, and `childExit.observed` must be exactly
-`true` with an integer `childExit.code`. Native `completed` requires exit `0`;
-native `failed` and `cancelled` accept any integer exit.
+`classifyReceipt()` (`src/lib/native-review-terminal.ts`) picks the reader from
+discriminators, never by trial — see *Receipt shapes* above. There is no
+version-sniffing fallback: a receipt that looks native and fails validation is
+refused rather than retried against the flat matcher.
 
 A release wrapper's non-zero exit on **HOLD** is normal. Terminal proof comes
-from the observed native child exit read from evidence. The wrapper exit is
-preserved as `wrapper_exit_code`, including `1`; the native exit is preserved
-as `receipt_exit_code`. `review_decision` records the decision but is never
-proof: neither `pass` nor `hold` can replace observed terminal child evidence.
-**Resume is not approval.** The summary also records `receipt_kind` and
-`receipt_schema_version`; unversioned receipts have null version, wrapper exit
-and review decision.
+from the observed native child exit read from the authoritative `result.json`.
+The wrapper's own exit is preserved as `native.wrapper_exit_code`, including
+`1`; the proven child exit is `receipt_exit_code`. `native.review_decision`
+records the verdict but is never proof: neither `pass` nor `hold` can replace
+observed terminal child evidence. **Resume is not approval.**
 
 ## Durable audit
 

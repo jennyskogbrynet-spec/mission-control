@@ -3,6 +3,15 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from '
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
+import {
+  MAX_NATIVE_FILE_BYTES,
+  classifyReceipt,
+  isTerminalStatus,
+  verifyNativeTerminalEvidence,
+  type BoundedFile,
+  type NativeTerminalEvidence,
+  type TerminalStatus,
+} from './native-review-terminal'
 
 /**
  * Server-side reconciliation of native worker evidence for the review-resume
@@ -10,8 +19,9 @@ import { z } from 'zod'
  * reads the canonical local controller journal and the native terminal receipts
  * the journal points at, and fails closed on anything it cannot prove.
  *
- * Roots are injectable for tests only. At runtime the fixed canonical paths are
- * used; a request can never choose a root.
+ * Two receipt roots are trusted, both fixed at runtime: the legacy receipt root
+ * and the native Codex review per-PR root. Roots are injectable for tests only;
+ * a request can never choose a root.
  */
 
 /** Only the primary workspace owns the local controller journal. */
@@ -21,18 +31,18 @@ const MAX_JOURNAL_FILES = 400
 const MAX_FILE_BYTES = 512_000
 const MAX_RECEIPT_ROOTS = 8
 
-const TERMINAL_WORKER_STATUSES = ['completed', 'failed', 'cancelled'] as const
-type TerminalStatus = (typeof TERMINAL_WORKER_STATUSES)[number]
-
-const isTerminal = (status: string): status is TerminalStatus =>
-  (TERMINAL_WORKER_STATUSES as readonly string[]).includes(status)
+const isTerminal = isTerminalStatus
 
 const workerSchema = z
   .object({
     workerId: z.string().min(1).max(200),
     taskId: z.number().int().positive(),
     dispatch: z
-      .object({ phase: z.string().min(1).max(64).optional() })
+      .object({ phase: z.string().min(1).max(64).optional(), modelId: z.string().min(1).max(120).nullish(), hostModelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish() })
+      .passthrough()
+      .optional(),
+    route: z
+      .object({ model: z.string().min(1).max(120).nullish(), modelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish() })
       .passthrough()
       .optional(),
     status: z.string().min(1).max(64),
@@ -59,97 +69,6 @@ const receiptSchema = z
   })
   .passthrough()
 
-const wrapperFields = {
-  exitCode: z.number().int().nullish(),
-  decision: z.string().min(1).max(64).nullish(),
-  sessionRef: z.string().min(1).max(400).nullish(),
-}
-
-const inlineWrapperSchema = z.object({
-  ...wrapperFields,
-  native: z.object({
-    status: receiptSchema.shape.status,
-    decision: wrapperFields.decision,
-    sourceThreadId: z.string().min(1).max(300).nullish(),
-    childExit: z.object({
-      observed: z.boolean().optional(),
-      code: z.number().int().nullish(),
-    }).nullish(),
-  }),
-})
-
-const hostWrapperSchema = z.object({
-  ...wrapperFields,
-  status: receiptSchema.shape.status,
-  nativeResultRef: z.string().min(1).max(1000),
-})
-
-interface DecodedReceipt {
-  kind: 'native' | 'wrapper'
-  schemaVersion: number | null
-  status: string
-  exitCode: number | null
-  wrapperExitCode: number | null
-  decision: string | null
-  sessionRef: string | null
-  sessionId: string | null
-  nativeStatus: string | null
-  nativeChildExit: number | null
-  nativeResultRef: string | null
-  /** Parsed evidence retained for the digest, including referenced evidence. */
-  evidence: unknown
-}
-
-/** Decode only; host references are bounded and loaded once by the reconciler. */
-function decodeReceipt(value: unknown): DecodedReceipt {
-  const envelope = z.object({}).passthrough().parse(value)
-  if (!Object.prototype.hasOwnProperty.call(envelope, 'schemaVersion')) {
-    // Preserve the unversioned CLI schema and canonical digest input exactly.
-    const receipt = receiptSchema.parse(value)
-    return {
-      kind: 'native', schemaVersion: null, status: receipt.status,
-      exitCode: receipt.exitCode ?? null, wrapperExitCode: null, decision: null,
-      sessionRef: receipt.sessionRef ?? null, sessionId: receipt.sessionId ?? null,
-      nativeStatus: null, nativeChildExit: null, nativeResultRef: null,
-      evidence: receipt,
-    }
-  }
-  if (envelope.schemaVersion !== 1) {
-    throw new Error(`unsupported receipt schemaVersion ${JSON.stringify(envelope.schemaVersion)}`)
-  }
-  if (envelope.native !== undefined) {
-    const receipt = inlineWrapperSchema.parse(value)
-    const native = receipt.native
-    return {
-      kind: 'wrapper', schemaVersion: 1, status: native.status,
-      exitCode: null, wrapperExitCode: receipt.exitCode ?? null,
-      decision: native.decision ?? null,
-      sessionRef: receipt.sessionRef ?? null, sessionId: native.sourceThreadId ?? null,
-      nativeStatus: native.status,
-      nativeChildExit: native.childExit?.observed === true ? native.childExit.code ?? null : null,
-      nativeResultRef: null, evidence: value,
-    }
-  }
-  const receipt = hostWrapperSchema.parse(value)
-  return {
-    kind: 'wrapper', schemaVersion: 1, status: receipt.status,
-    exitCode: null, wrapperExitCode: receipt.exitCode ?? null,
-    decision: receipt.decision ?? null,
-    sessionRef: receipt.sessionRef ?? null, sessionId: null,
-    nativeStatus: null, nativeChildExit: null,
-    nativeResultRef: receipt.nativeResultRef, evidence: value,
-  }
-}
-
-function receiptSessionMatches(receipt: DecodedReceipt, sessionRef: string): boolean {
-  // Either field may be absent, but every supplied identity must agree.
-  return (
-    (receipt.sessionRef !== null || receipt.sessionId !== null) &&
-    (receipt.sessionRef === null || receipt.sessionRef === sessionRef) &&
-    (receipt.sessionId === null || sessionRef.endsWith(`:${receipt.sessionId}`))
-  )
-}
-
 export type ResumeEvidenceCode =
   | 'workspace_not_supported'
   | 'evidence_unavailable'
@@ -158,6 +77,9 @@ export type ResumeEvidenceCode =
   | 'worker_not_terminal'
   | 'receipt_mismatch'
 
+/** Path-free native provenance; only present for native Codex receipts. */
+export type NativeProvenance = Omit<NativeTerminalEvidence, 'native_result_ref'>
+
 /** Public, path-free summary of one reconciled worker. */
 export interface ReconciledWorker {
   worker_id: string
@@ -165,20 +87,23 @@ export interface ReconciledWorker {
   status: TerminalStatus
   session_ref: string
   receipt_status: string
+  /**
+   * The exit that proves the worker's own process ended. For native receipts
+   * this is the observed native child exit, never a wrapper decision exit.
+   */
   receipt_exit_code: number
-  receipt_kind: 'native' | 'wrapper'
-  receipt_schema_version: number | null
-  wrapper_exit_code: number | null
-  review_decision: string | null
   receipt_digest: string
   run_id: string | null
+  native?: NativeProvenance
 }
 
 export interface ResumeEvidenceDeps {
   /** Directory holding the controller run journals (`*.json`). */
   journalRoot: string
-  /** Receipts must resolve inside one of these roots. */
+  /** Legacy receipts must resolve inside one of these roots. */
   receiptRoots: string[]
+  /** Fixed `<...>/babysential-codex-review/perPR` root for native receipts. */
+  nativeReviewRoot: string
 }
 
 export interface ResumeEvidenceRequest {
@@ -194,6 +119,7 @@ export type ResumeEvidenceResult =
 
 /** Operator-configured durable evidence root, in addition to `~/tmp`. */
 export const EVIDENCE_ROOT_ENV = 'MC_EVIDENCE_ROOT'
+/** Operator-configured comma list of further durable legacy receipt roots. */
 export const RECEIPT_ROOTS_ENV = 'MC_RECEIPT_ROOTS'
 
 /** True when `target` sits inside `root`, and is not `root` itself. */
@@ -219,6 +145,9 @@ function strictlyUnder(target: string, root: string): boolean {
  * itself sweepable. That refuses `/` and `$HOME`, but also every ancestor of
  * `$HOME` (`/Users`), which is strictly wider than the `$HOME` case and was the
  * gap an earlier equality-only check left open.
+ *
+ * These roots only widen where *legacy* receipts may live. The authoritative
+ * native review root is fixed below and is never operator-configurable.
  */
 function configuredEvidenceRoot(
   home: string,
@@ -289,6 +218,13 @@ export function defaultResumeEvidenceDeps(): ResumeEvidenceDeps {
       'runs',
     ),
     receiptRoots,
+    nativeReviewRoot: path.join(
+      home,
+      '.openclaw',
+      'state',
+      'babysential-codex-review',
+      'perPR',
+    ),
   }
 }
 
@@ -313,20 +249,41 @@ function containedIn(target: string, roots: string[]): boolean {
 /**
  * Read a JSON file that must be a real, owner-readable regular file inside an
  * allowed root, small enough to parse. Symlinks and traversal are rejected
- * rather than followed.
+ * rather than followed. The raw bytes are returned so callers can verify the
+ * digests the native receipts assert over exact file content.
  */
-function readBoundedJson(filePath: string, roots: string[]): unknown {
+function readBoundedFile(
+  filePath: string,
+  roots: string[],
+  maxBytes = MAX_FILE_BYTES,
+): BoundedFile {
   if (!path.isAbsolute(filePath) || filePath.split(path.sep).includes('..')) {
     throw new Error('non-canonical path')
   }
   const stat = lstatSync(filePath)
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('not a regular file')
-  if (stat.size > MAX_FILE_BYTES) throw new Error('file too large')
+  if (stat.size > maxBytes) throw new Error('file too large')
   // Containment is checked on the resolved path, so a symlinked parent
   // directory cannot smuggle a file in from outside the trusted roots.
   const real = realpathSync(filePath)
   if (!containedIn(real, roots)) throw new Error('outside the trusted roots')
-  return JSON.parse(readFileSync(real, 'utf8'))
+  const raw = readFileSync(real)
+  // Hash original bytes and reject lossy decoding of immutable evidence.
+  const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw)
+  return { realPath: real, raw, json: JSON.parse(decoded) }
+}
+
+function readBoundedJson(filePath: string, roots: string[]): unknown {
+  return readBoundedFile(filePath, roots).json
+}
+
+/** Resolve a path once; an unresolvable fixed root simply trusts nothing. */
+function resolveReal(target: string): string | null {
+  try {
+    return realpathSync(target)
+  } catch {
+    return null
+  }
 }
 
 interface JournalWorker {
@@ -335,6 +292,8 @@ interface JournalWorker {
   status: string
   sessionRef: string | null
   receiptRef: string | null
+  models: string[]
+  accountIds: string[]
   runId: string | null
   journalFile: string
 }
@@ -428,6 +387,8 @@ export function reconcileNativeTerminalEvidence(
         status: worker.status,
         sessionRef: worker.sessionRef ?? null,
         receiptRef: worker.receiptRef ?? null,
+        models: [worker.route?.model, worker.route?.modelId, worker.dispatch?.modelId, worker.dispatch?.hostModelId].filter((v): v is string => typeof v === 'string'),
+        accountIds: [worker.route?.accountId, worker.dispatch?.accountId].filter((v): v is string => typeof v === 'string'),
         runId: parsed.id ?? null,
         journalFile: name,
       })
@@ -444,6 +405,11 @@ export function reconcileNativeTerminalEvidence(
 
   const reconciled: ReconciledWorker[] = []
   const receiptRefs: string[] = []
+  const resolvedNativeRoot = resolveReal(deps.nativeReviewRoot)
+  const nativeReviewRoot = resolvedNativeRoot === path.resolve(deps.nativeReviewRoot) ? resolvedNativeRoot : null
+  const trustedReceiptRoots = nativeReviewRoot
+    ? [...deps.receiptRoots, nativeReviewRoot]
+    : deps.receiptRoots
 
   for (const worker of workers) {
     if (!isTerminal(worker.status)) {
@@ -461,27 +427,87 @@ export function reconcileNativeTerminalEvidence(
       )
     }
 
-    let receipt: DecodedReceipt
+    let file: BoundedFile
+    let kind: ReturnType<typeof classifyReceipt>
     try {
-      receipt = decodeReceipt(readBoundedJson(worker.receiptRef, deps.receiptRoots))
-      if (receipt.kind === 'wrapper' && receipt.nativeResultRef !== null) {
-        const native = decodeReceipt(readBoundedJson(receipt.nativeResultRef, deps.receiptRoots))
-        // A host observation must point directly at an inline native result
-        // for this worker. Never follow another host or borrow another session.
-        if (native.kind !== 'wrapper' || native.nativeStatus === null) {
-          throw new Error('nativeResultRef must contain an inline version 1 wrapper result')
-        }
-        if (!receiptSessionMatches(native, worker.sessionRef)) {
-          throw new Error('referenced native result session does not match the worker')
-        }
-        receipt = {
-          ...receipt,
-          sessionId: native.sessionId,
-          nativeStatus: native.nativeStatus,
-          nativeChildExit: native.nativeChildExit,
-          evidence: { receipt: receipt.evidence, nativeResult: native.evidence },
-        }
+      // Native results are accepted only within the fixed native review root.
+      const insideNativeRoot =
+        nativeReviewRoot !== null &&
+        containedIn(resolveReal(worker.receiptRef) ?? '', [nativeReviewRoot])
+      file = readBoundedFile(
+        worker.receiptRef,
+        trustedReceiptRoots,
+        insideNativeRoot ? MAX_NATIVE_FILE_BYTES : MAX_FILE_BYTES,
+      )
+      kind = classifyReceipt(file.json)
+      // The native review root holds authoritative results only, and an
+      // authoritative result is only trusted from that root.
+      if (insideNativeRoot && file.realPath !== path.resolve(worker.receiptRef)) {
+        throw new Error('native path contains a symlink')
       }
+      if (insideNativeRoot && kind !== 'native_result') {
+        throw new Error('the native review root holds native result receipts only')
+      }
+      if (!insideNativeRoot && kind === 'native_result') {
+        throw new Error('a native result outside the fixed native review root is not trusted')
+      }
+    } catch (error) {
+      return fail(
+        'receipt_mismatch',
+        'A native terminal receipt is missing or unreadable, so the workers cannot be proven finished',
+        `worker ${worker.workerId} receipt: ${(error as Error).message}`,
+      )
+    }
+
+    if (kind !== 'legacy') {
+      // Immutable native Codex receipt, read directly or through its one
+      // derived host observation. Nothing here is rewritten to the flat shape.
+      let native: NativeTerminalEvidence
+      try {
+        native = verifyNativeTerminalEvidence(
+          file,
+          kind,
+          {
+            taskId: request.taskId,
+            status: worker.status,
+            sessionRef: worker.sessionRef,
+            models: worker.models,
+            accountIds: worker.accountIds,
+          },
+          { read: (filePath, roots, maxBytes) => {
+            const result = readBoundedFile(filePath, roots, maxBytes)
+            if (result.realPath !== path.resolve(filePath)) throw new Error('native path contains a symlink')
+            return result
+          }, nativeReviewRoot },
+        )
+      } catch (error) {
+        return fail(
+          'receipt_mismatch',
+          'A native terminal receipt does not prove the recorded worker finished',
+          `worker ${worker.workerId} native receipt: ${(error as Error).message}`,
+        )
+      }
+
+      const { native_result_ref: nativeResultRef, ...provenance } = native
+      reconciled.push({
+        worker_id: worker.workerId,
+        phase: worker.phase,
+        status: worker.status,
+        session_ref: worker.sessionRef,
+        receipt_status: native.native_status,
+        receipt_exit_code: native.child_exit_code,
+        receipt_digest: digest(JSON.stringify(file.json)),
+        run_id: worker.runId,
+        native: provenance,
+      })
+      receiptRefs.push(worker.receiptRef)
+      if (nativeResultRef !== worker.receiptRef) receiptRefs.push(nativeResultRef)
+      continue
+    }
+
+    let receipt: z.infer<typeof receiptSchema>
+    try {
+      receipt = receiptSchema.parse(file.json)
     } catch (error) {
       return fail(
         'receipt_mismatch',
@@ -492,13 +518,15 @@ export function reconcileNativeTerminalEvidence(
 
     // The receipt itself must prove a terminal native process: matching status,
     // an actual exit code and the same session the journal registered.
-    const exitCode = receipt.kind === 'native' ? receipt.exitCode : receipt.nativeChildExit
+    const exitCode = receipt.exitCode
     const exitProvesTerminal =
       typeof exitCode === 'number' &&
-      (receipt.status !== 'completed' || exitCode === 0) &&
-      (receipt.kind === 'native' ||
-        (receipt.nativeStatus !== null && isTerminal(receipt.nativeStatus) && receipt.nativeStatus === receipt.status))
-    const sessionMatches = receiptSessionMatches(receipt, worker.sessionRef)
+      (receipt.status !== 'completed' || exitCode === 0)
+    // Either field may be absent, but every supplied identity must agree.
+    const sessionMatches =
+      (receipt.sessionRef !== undefined || receipt.sessionId !== undefined) &&
+      (receipt.sessionRef === undefined || receipt.sessionRef === worker.sessionRef) &&
+      (receipt.sessionId === undefined || worker.sessionRef.endsWith(`:${receipt.sessionId}`))
 
     if (
       !isTerminal(receipt.status) ||
@@ -520,12 +548,7 @@ export function reconcileNativeTerminalEvidence(
       session_ref: worker.sessionRef,
       receipt_status: receipt.status,
       receipt_exit_code: exitCode as number,
-      receipt_kind: receipt.kind,
-      receipt_schema_version: receipt.schemaVersion,
-      // A wrapper's HOLD exit and decision are audit data, never terminal proof.
-      wrapper_exit_code: receipt.wrapperExitCode,
-      review_decision: receipt.decision,
-      receipt_digest: digest(JSON.stringify(receipt.evidence)),
+      receipt_digest: digest(JSON.stringify(receipt)),
       run_id: worker.runId,
     })
     receiptRefs.push(worker.receiptRef)
