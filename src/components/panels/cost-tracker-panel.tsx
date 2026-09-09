@@ -1,12 +1,20 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { useMissionControl } from '@/store'
 import { createClientLogger } from '@/lib/client-logger'
 import { getLowestRecordedUnitCost, describeUsageCost, getKnownCostShare, formatPriceCoverage, type CostCoverage, formatUsageCost as formatCost } from '@/lib/cost-insights'
+import {
+  COST_SCOPE_NOTICE,
+  COST_COVERAGE_TOOLTIP,
+  COST_UNAVAILABLE_PLACEHOLDER,
+  computePricedCoverage,
+  isCostDisplayable,
+  formatGatedCost,
+} from '@/lib/cost-display'
 import {
   PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, BarChart, Bar,
@@ -90,6 +98,41 @@ const formatNumber = (num: number) => {
   return num.toString()
 }
 
+
+// Every tab in this panel reads the same token ledger, so one coverage number
+// describes all of them. It is provided through context rather than threaded as
+// a prop because the four views nest several levels deep and a missed prop would
+// silently restore the un-gated number this panel exists to stop showing.
+const CostCoverageContext = createContext<number | null>(null)
+
+function useGatedCostFormat() {
+  const coverage = useContext(CostCoverageContext)
+  const gated = !isCostDisplayable(coverage)
+  return {
+    /** A dollar amount, or the placeholder when coverage cannot back it. */
+    fc: (cost: number) => formatGatedCost(cost, coverage, formatCost),
+    /**
+     * A ready-made label from `describeUsageCost`. Labels that already withhold
+     * ('Unknown', 'No usage') pass through untouched: they are not claims about
+     * an amount, so the coverage gate has nothing to withhold in them.
+     */
+    gl: (label: string) => (gated && label.includes('$') ? COST_UNAVAILABLE_PLACEHOLDER : label),
+    gated,
+  }
+}
+
+/** A dollar amount, or an em dash plus explanation when coverage cannot back it. */
+function CostValue({ value }: { value: number }) {
+  const { fc, gated } = useGatedCostFormat()
+  return <span title={gated ? COST_COVERAGE_TOOLTIP : undefined}>{fc(value)}</span>
+}
+
+/** A `describeUsageCost` label, withheld when coverage cannot back its dollars. */
+function CostLabel({ label }: { label: string }) {
+  const { gl, gated } = useGatedCostFormat()
+  const withheld = gated && label.includes('$')
+  return <span title={withheld ? COST_COVERAGE_TOOLTIP : undefined}>{gl(label)}</span>
+}
 
 const getModelDisplayName = (name: string) => name.split('/').pop() || name
 
@@ -184,6 +227,23 @@ export function CostTrackerPanel() {
     }
   }
 
+  // Priced coverage for the selected timeframe. `usageStats.models` is the token
+  // breakdown per model, which is exactly the denominator the gate needs: tokens
+  // whose model the catalogue prices, over all tokens. Anything else in this
+  // panel is a slice of the same ledger, so one number governs every tab.
+  const pricedCoverage = useMemo(
+    () => computePricedCoverage(
+      Object.entries(usageStats?.models || {}).map(([model, stats]) => ({
+        model,
+        totalTokens: stats.totalTokens,
+      })),
+    ),
+    [usageStats],
+  )
+  const coveragePercent = pricedCoverage.coverage === null
+    ? null
+    : Math.round(pricedCoverage.coverage * 1000) / 10
+
   // Derived data
   const summary = usageStats?.summary
   const agentSummary = byAgentData?.summary
@@ -198,6 +258,7 @@ export function CostTrackerPanel() {
   }
 
   return (
+    <CostCoverageContext.Provider value={pricedCoverage.coverage}>
     <div className="p-6 space-y-6">
       {/* Header */}
       <div className="border-b border-border pb-4">
@@ -234,6 +295,28 @@ export function CostTrackerPanel() {
       </div>
 
       {loadError && <div role="alert" className="text-sm text-red-400">{loadError}</div>}
+
+      {/* Scope and coverage. Rendered outside the tab switch so it is on every
+          tab: the tabs are different cuts of one ledger, not different sources. */}
+      <div
+        data-testid="cost-scope-notice"
+        className="rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground space-y-1"
+      >
+        <div>{COST_SCOPE_NOTICE}</div>
+        <div>
+          {coveragePercent === null
+            ? 'No token records in this timeframe, so no priced coverage can be computed. Amounts are withheld.'
+            : `Priced coverage: ${coveragePercent} % of ${formatNumber(pricedCoverage.totalTokens)} tokens have a catalogue price.${
+                isCostDisplayable(pricedCoverage.coverage)
+                  ? ''
+                  : ' Dollar amounts are withheld below 50 % — the remainder would be priced at a default rate, not a known one.'
+              }`}
+        </div>
+      </div>
+
+      {/* The measurement disclosure below is deliberately NOT gated: it is the
+          statement of what is and is not priced, so withholding its own figures
+          would remove the explanation the gate points at. */}
       {usageStats?.coverage && <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground space-y-1">
         <div>Shared usage data: {usageStats.coverage.sourceRecords.database + usageStats.coverage.sourceRecords.manual} reported usage records + {usageStats.coverage.sourceRecords.sessionSnapshots} session snapshots without identified overlaps. Overview and agents use the same data.</div>
         <div>Reported cost: {formatCost(usageStats.coverage.billedCost)}. Catalogue estimate: {formatCost(usageStats.coverage.estimatedCost)}; Claude and Grok base prices verified 2026-09-08; other provider estimates were not reverified. Excludes cache pricing, tools and special pricing modifiers.</div>
@@ -267,6 +350,7 @@ export function CostTrackerPanel() {
         <TasksView taskData={taskData} onRefresh={loadData} />
       )}
     </div>
+    </CostCoverageContext.Provider>
   )
 }
 
@@ -283,6 +367,7 @@ function OverviewView({
   exportData: (f: 'json' | 'csv') => void; isExporting: boolean
   onRefresh: () => void
 }) {
+  const { fc } = useGatedCostFormat()
   const t = useTranslations('costTracker')
   if (!stats) {
     return (
@@ -328,7 +413,7 @@ function OverviewView({
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{describeUsageCost(stats.summary).label}</div>
+          <div className="text-3xl font-bold text-foreground"><CostLabel label={describeUsageCost(stats.summary).label} /></div>
           <div className="text-sm text-muted-foreground">{t('totalCost', { timeframe })}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -413,7 +498,7 @@ function OverviewView({
                   <Pie data={pieData} cx="50%" cy="50%" innerRadius={40} outerRadius={80} paddingAngle={5} dataKey="value">
                     {pieData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                   </Pie>
-                  <Tooltip formatter={(v) => formatCost(Number(v))} /><Legend />
+                  <Tooltip formatter={(v) => fc(Number(v))} /><Legend />
                 </PieChart>
               </ResponsiveContainer>
             )}
@@ -430,7 +515,7 @@ function OverviewView({
               <div className="text-xs text-muted-foreground mb-1">Lowest recorded unit cost</div>
               <div className="text-lg font-bold text-green-500">{mostEfficient ? getModelDisplayName(mostEfficient.model) : '-'}</div>
               {!mostEfficient && <div className="text-xs text-muted-foreground">No positive, attributed model cost to compare.</div>}
-              {mostEfficient && <div className="text-xs text-muted-foreground">{formatCost(efficientCostPerToken * 1000)}/1K priced tokens</div>}
+              {mostEfficient && <div className="text-xs text-muted-foreground">{fc(efficientCostPerToken * 1000)}/1K priced tokens</div>}
             </div>
             <div className="bg-secondary rounded-lg p-4">
               <div className="text-xs text-muted-foreground mb-1">{t('avgTokensPerRequest')}</div>
@@ -455,7 +540,7 @@ function OverviewView({
                       <div className="bg-green-500 h-2 rounded-full" style={{ width: `${costPer1k != null && maxCostPer1k > 0 ? costPer1k / maxCostPer1k * 100 : 0}%` }} />
                     </div>
                   </div>
-                  <div className="w-36 text-right text-xs text-muted-foreground">{costPer1k == null ? 'Unknown' : `${formatCost(costPer1k)}/1K${m.costInfo.partial ? ' priced (partial)' : ''}`}</div>
+                  <div className="w-36 text-right text-xs text-muted-foreground">{costPer1k == null ? 'Unknown' : `${fc(costPer1k)}/1K${m.costInfo.partial ? ' priced (partial)' : ''}`}</div>
                 </div>
               )
             })}
@@ -490,6 +575,7 @@ function AgentsView({
   setExpandedAgent: (a: string | null) => void
   getAgentTasks: (name: string) => TaskCostEntry[]; onRefresh: () => void
 }) {
+  const { fc } = useGatedCostFormat()
   const t = useTranslations('costTracker')
   const [expandedSection, setExpandedSection] = useState<'models' | 'tasks'>('tasks')
 
@@ -513,7 +599,7 @@ function AgentsView({
           <div className="text-sm text-muted-foreground">{t('agents')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{summaryCost.label}</div>
+          <div className="text-3xl font-bold text-foreground"><CostLabel label={summaryCost.label} /></div>
           <div className="text-sm text-muted-foreground">{t('totalCostDays', { days: summary.days })}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -522,7 +608,7 @@ function AgentsView({
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
           <div className="text-3xl font-bold text-foreground">
-            {summaryCost.costPerThousand == null ? 'Unknown' : formatCost(summaryCost.costPerThousand)}
+            {summaryCost.costPerThousand == null ? 'Unknown' : fc(summaryCost.costPerThousand)}
           </div>
           <div className="text-sm text-muted-foreground">Avg per 1K priced tokens{summaryCost.partial ? ' (partial)' : ''}</div>
         </div>
@@ -539,7 +625,7 @@ function AgentsView({
             }))}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="name" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(v) => formatCost(Number(v))} />
+              <Tooltip formatter={(v) => fc(Number(v))} />
               <Bar dataKey="cost" fill="#0088FE" name="Cost ($)" />
             </BarChart>
           </ResponsiveContainer>
@@ -580,7 +666,7 @@ function AgentsView({
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="font-medium text-foreground">{costInfo.label}</div>
+                      <div className="font-medium text-foreground"><CostLabel label={costInfo.label} /></div>
                       <div className="text-xs text-muted-foreground">{costShare == null ? '—' : `${costShare.toFixed(1)}% of known cost`}</div>
                     </div>
                     <div className="text-right">
@@ -626,7 +712,7 @@ function AgentsView({
                                   {task.project.ticketRef && <span className="text-muted-foreground font-mono">{task.project.ticketRef}</span>}
                                   <span className="text-foreground truncate">{task.title}</span>
                                 </div>
-                                <span className="font-medium text-foreground w-16 text-right shrink-0">{describeUsageCost(task.stats).label}</span>
+                                <span className="font-medium text-foreground w-16 text-right shrink-0"><CostLabel label={describeUsageCost(task.stats).label} /></span>
                               </div>
                             ))}
                           </div>
@@ -643,7 +729,7 @@ function AgentsView({
                               <span>{formatNumber(m.input_tokens)} in</span>
                               <span>{formatNumber(m.output_tokens)} out</span>
                               <span>{m.request_count} reqs</span>
-                              <span className="font-medium text-foreground w-16 text-right">{describeUsageCost({ totalTokens: m.input_tokens + m.output_tokens, totalCost: m.cost, ...m.pricing }).label}</span>
+                              <span className="font-medium text-foreground w-16 text-right"><CostLabel label={describeUsageCost({ totalTokens: m.input_tokens + m.output_tokens, totalCost: m.cost, ...m.pricing }).label} /></span>
                             </div>
                           </div>
                         ))}
@@ -669,6 +755,7 @@ function SessionsView({
   sessionSort: 'cost' | 'tokens' | 'requests' | 'recent'
   setSessionSort: (s: 'cost' | 'tokens' | 'requests' | 'recent') => void
 }) {
+  const { fc } = useGatedCostFormat()
   const t = useTranslations('costTracker')
   const sorted = [...sessionCosts].sort((a, b) => {
     switch (sessionSort) {
@@ -716,7 +803,7 @@ function SessionsView({
                     </div>
                   </div>
                   <div className="text-right flex-shrink-0">
-                    <div className="text-lg font-bold text-foreground">{costInfo.label}</div>
+                    <div className="text-lg font-bold text-foreground"><CostLabel label={costInfo.label} /></div>
                     <div className="text-xs text-muted-foreground">{formatNumber(entry.totalTokens)} tokens</div>
                   </div>
                 </div>
@@ -724,7 +811,7 @@ function SessionsView({
                   <div><span className="font-medium text-foreground">{entry.requestCount}</span> records</div>
                   <div><span className="font-medium text-foreground">{formatNumber(entry.inputTokens || 0)}</span> {t('inShort')}</div>
                   <div><span className="font-medium text-foreground">{formatNumber(entry.outputTokens || 0)}</span> {t('outShort')}</div>
-                  <div>{costInfo.costPerRecord == null ? 'Unknown' : <span className="font-medium text-foreground">{formatCost(costInfo.costPerRecord)}</span>} avg/priced record{costInfo.partial ? ' (partial)' : ''}</div>
+                  <div>{costInfo.costPerRecord == null ? 'Unknown' : <span className="font-medium text-foreground">{fc(costInfo.costPerRecord)}</span>} avg/priced record{costInfo.partial ? ' (partial)' : ''}</div>
                 </div>
               </div>
             )
@@ -758,7 +845,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
           <div className="text-sm text-muted-foreground">{t('tasksWithCosts')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{taskData.summary.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.summary).label}</div>
+          <div className="text-3xl font-bold text-foreground"><CostLabel label={taskData.summary.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.summary).label} /></div>
           <div className="text-sm text-muted-foreground">{t('attributedCost')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -766,7 +853,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
           <div className="text-sm text-muted-foreground">{t('attributedTokens')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-orange-500">{taskData.unattributed.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.unattributed).label}</div>
+          <div className="text-3xl font-bold text-orange-500"><CostLabel label={taskData.unattributed.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.unattributed).label} /></div>
           <div className="text-sm text-muted-foreground">{t('unattributed')}</div>
         </div>
       </div>
@@ -794,7 +881,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
                   }`}>{task.status}</span>
                 </div>
                 <div className="text-right shrink-0 ml-3">
-                  <div className="font-medium text-foreground">{describeUsageCost(task.stats).label}</div>
+                  <div className="font-medium text-foreground"><CostLabel label={describeUsageCost(task.stats).label} /></div>
                   <div className="text-xs text-muted-foreground">{formatNumber(task.stats.totalTokens)} {t('tokens')} | {task.stats.requestCount} {t('reqs')}</div>
                 </div>
               </div>

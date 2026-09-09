@@ -84,6 +84,18 @@ export function getKnownModelPricing(modelName: string): ModelPricing | null {
   return Object.entries(MODEL_PRICING).find(([name]) => name.split('/').pop() === normalized)?.[1] || null
 }
 
+/**
+ * True only when the catalogue actually knows this model.
+ *
+ * `getModelPricing` deliberately falls back to a Sonnet-shaped default so that a
+ * cost is always produced. That fallback is a guess, not a price, and any caller
+ * that reports coverage has to be able to tell the two apart. This delegates to
+ * `getKnownModelPricing` so there is exactly one definition of "known".
+ */
+export function hasCatalogPrice(modelName: string): boolean {
+  return getKnownModelPricing(modelName) !== null
+}
+
 /** Legacy estimate helper; cost reporting must use getKnownModelPricing. */
 export function getModelPricing(modelName: string): ModelPricing {
   const normalized = normalizedModelName(modelName)
