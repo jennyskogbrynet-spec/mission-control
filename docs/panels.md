@@ -55,15 +55,21 @@ Measured 2026-09-09 10:30 on this machine.
 |---|---|---|
 | `webhooks` | 0 webhooks configured, 0 deliveries | **hide** |
 | `github` | GitHub sync not configured | **hide** |
-| `alerts` | 0 alert rules | candidate — see below |
+| `alerts` | 0 alert rules at the time of measurement | **keep visible** — decided 2026-09-09 |
 
 ```
 MC_HIDDEN_PANELS=webhooks,github
 ```
 
-`alerts` measured the same as `webhooks` (zero configured) and is a reasonable
-addition, but it was not in the brief's list and is left to an explicit decision
-rather than folded in silently.
+`alerts` measured the same as `webhooks` (zero configured) and looked like a
+reasonable addition on that number alone. It is deliberately **not** in the
+default: the alerting panel is being put into use, so the zero is a
+not-yet-configured surface rather than an unused one. This is the difference
+between "nothing is there" and "nothing is there yet", and only the second one
+argues for hiding.
+
+`super/tenants` is not in the default either, for a different reason: it is not
+a panel id at all. See the next section.
 
 ## Two items that this control cannot address
 
