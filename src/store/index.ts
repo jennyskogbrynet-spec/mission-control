@@ -592,6 +592,10 @@ interface MissionControlStore {
   interfaceMode: 'essential' | 'full'
   setInterfaceMode: (mode: 'essential' | 'full') => void
 
+  // Panels switched off for this installation (MC_HIDDEN_PANELS, server-resolved)
+  hiddenPanels: string[]
+  setHiddenPanels: (panels: string[]) => void
+
   // UI State
   activeTab: string
   sidebarExpanded: boolean
@@ -942,6 +946,11 @@ export const useMissionControl = create<MissionControlStore>()(
     // Interface Mode
     interfaceMode: 'essential' as const,
     setInterfaceMode: (mode) => set({ interfaceMode: mode }),
+
+    // Hidden panels — empty until the capabilities probe answers, so an
+    // installation that configures nothing behaves exactly as before.
+    hiddenPanels: [] as string[],
+    setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
 
     // UI State — sidebar & layout persistence
     activeTab: 'headquarters',

@@ -8,6 +8,7 @@ import { useNavigateToPanel, usePrefetchPanel } from '@/lib/navigation'
 import { Button } from '@/components/ui/button'
 import { APP_VERSION } from '@/lib/version'
 import { getPluginNavItems } from '@/lib/plugins'
+import { isPanelHidden } from '@/lib/panel-visibility'
 
 interface NavItem {
   id: string
@@ -127,7 +128,7 @@ const gatewayOnlyPanels = new Set([
 const adminOnlyPanels = new Set<string>([])
 
 export function NavRail() {
-  const { activeTab, connection, dashboardMode, currentUser, activeTenant, tenants, osUsers, setActiveTenant, fetchTenants, fetchOsUsers, activeProject, projects, setActiveProject, fetchProjects, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup, defaultOrgName, interfaceMode, setInterfaceMode } = useMissionControl()
+  const { activeTab, connection, dashboardMode, currentUser, activeTenant, tenants, osUsers, setActiveTenant, fetchTenants, fetchOsUsers, activeProject, projects, setActiveProject, fetchProjects, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup, defaultOrgName, interfaceMode, setInterfaceMode, hiddenPanels } = useMissionControl()
   const navigateToPanel = useNavigateToPanel()
   const prefetchPanel = usePrefetchPanel()
   const tn = useTranslations('nav')
@@ -174,7 +175,8 @@ export function NavRail() {
   }, [activeTenant?.id])
 
   // In local mode, hide gateway-only panels. Non-admin users don't see admin-only panels.
-  // In essential mode, hide non-essential panels.
+  // In essential mode, hide non-essential panels. On top of all of that, an
+  // installation can switch panels off entirely via MC_HIDDEN_PANELS.
   const isEssential = interfaceMode === 'essential'
   function filterItems(items: NavItem[]): NavItem[] {
     return items
@@ -187,6 +189,9 @@ export function NavRail() {
         if (isLocal && gatewayOnlyPanels.has(i.id)) return null
         if (!isAdmin && adminOnlyPanels.has(i.id)) return null
         if (isEssential && !i.essential) return null
+        // Installation-level opt-out. Last of the filters because it is the
+        // bluntest: an id listed here is gone regardless of mode or role.
+        if (isPanelHidden(i.id, hiddenPanels)) return null
         return i
       })
       .filter((i): i is NavItem => i !== null)
