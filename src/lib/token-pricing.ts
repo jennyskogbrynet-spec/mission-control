@@ -1,4 +1,4 @@
-import { getProviderFromModel } from '@/lib/provider-subscriptions'
+import { getProviderFromModel } from '@/lib/provider-from-model'
 
 interface ModelPricing {
   inputPerMTok: number

@@ -209,20 +209,5 @@ export function getPrimarySubscription(forceRefresh = false): ProviderSubscripti
   return detected.anthropic || detected.openai || Object.values(detected)[0] || null
 }
 
-export function getProviderFromModel(modelName: string): string {
-  const normalized = modelName.trim().toLowerCase()
-  if (!normalized) return 'unknown'
-
-  const [prefix] = normalized.split('/')
-  if (prefix && !prefix.includes(':')) {
-    // Most models are provider-prefixed, e.g., "anthropic/claude-sonnet-4-5".
-    if (prefix === 'claude') return 'anthropic'
-    if (prefix === 'gpt' || prefix === 'o1' || prefix === 'o3') return 'openai'
-    return prefix
-  }
-
-  if (normalized.includes('claude')) return 'anthropic'
-  if (normalized.includes('gpt') || normalized.includes('codex') || normalized.includes('o1') || normalized.includes('o3')) return 'openai'
-  return 'unknown'
-}
+export { getProviderFromModel } from '@/lib/provider-from-model'
 
