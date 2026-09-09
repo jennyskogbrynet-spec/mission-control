@@ -547,6 +547,7 @@ describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
   let actual: typeof import('../task-review-resume')
   let scratch = ''
   const savedEnv = process.env.MC_EVIDENCE_ROOT
+  const savedReceiptRoots = process.env.MC_RECEIPT_ROOTS
   const tmpRoot = path.join(homedir(), 'tmp')
   const request = { taskId: 999, projectId: 2, workspaceId: 1 }
 
@@ -579,12 +580,15 @@ describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
     // scratch dir in the system temp root could no longer stand in for one.
     scratch = mkdtempSync(path.join(homedir(), '.mc-evidence-root-test-'))
     delete process.env.MC_EVIDENCE_ROOT
+    delete process.env.MC_RECEIPT_ROOTS
   })
 
   afterEach(() => {
     rmSync(scratch, { recursive: true, force: true })
     if (savedEnv === undefined) delete process.env.MC_EVIDENCE_ROOT
     else process.env.MC_EVIDENCE_ROOT = savedEnv
+    if (savedReceiptRoots === undefined) delete process.env.MC_RECEIPT_ROOTS
+    else process.env.MC_RECEIPT_ROOTS = savedReceiptRoots
   })
 
   it('leaves the ~/tmp receipt root untouched when the variable is unset', () => {

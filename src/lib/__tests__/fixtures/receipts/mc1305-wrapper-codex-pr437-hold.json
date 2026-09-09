@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "runId": "fe048d7c-70e1-4946-9b9b-dc1134de61f0",
+  "requestSha256": "35feb63b67cfaaec6a78b23c4e3c49eb8f6030b5086bf0805cdd096f012f17a8",
+  "completedAt": "2026-09-09T13:23:45.334Z",
+  "native": {
+    "mechanism": "turn/start+outputSchema",
+    "status": "completed",
+    "decision": "hold",
+    "review": {
+      "decision": "hold",
+      "summary": "Inspected all five changed files and relevant source/tests; candidate identifiers and policy digest match. No production-code defect identified. Integrator logs report 28 passing tests and successful required CI. I ran no test suites or browser checks; required browser acceptance evidence remains missing.",
+      "findings": [
+        {
+          "priority": "P2",
+          "file": "e2e/birth-plan-newsletter.spec.ts",
+          "line": 60,
+          "description": "The packet explicitly marks this spec unexecuted. It contains the actual radio selection, wizard completion and mobile/desktop reload checks required by acceptance criteria 1 and 4. The passing Vitest tests render popup/footer components with mocked navigation and layout, so they cannot verify these flows. Attach successful browser results on this candidate, including the article keyboard-dismissal control, before approval."
+        }
+      ]
+    },
+    "requestedModel": "gpt-6-astra",
+    "observedModel": "gpt-6-astra",
+    "accountBefore": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "accountAfter": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "sourceThreadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+    "reviewThreadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+    "turnId": "01a08654-2422-7671-ba08-72500a2b73ae",
+    "terminal": {
+      "method": "turn/completed",
+      "threadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+      "turn": {
+        "id": "01a08654-2422-7671-ba08-72500a2b73ae",
+        "status": "completed",
+        "startedAt": 1788960056,
+        "completedAt": 1788960224,
+        "durationMs": 168478
+      }
+    },
+    "exitedReviewMode": null,
+    "childExit": {
+      "observed": true,
+      "code": 0,
+      "signal": null
+    },
+    "errorCode": null,
+    "operationalEvents": [
+      {
+        "type": "starting",
+        "at": "2026-09-09T13:20:56.181Z"
+      },
+      {
+        "type": "mcp_disabled_verified",
+        "at": "2026-09-09T13:20:56.354Z",
+        "count": 4
+      },
+      {
+        "type": "turn/started",
+        "at": "2026-09-09T13:20:56.356Z",
+        "threadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+        "turnId": "01a08654-2422-7671-ba08-72500a2b73ae",
+        "itemType": null
+      },
+      {
+        "type": "item/started",
+        "at": "2026-09-09T13:20:57.900Z",
+        "threadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+        "turnId": "01a08654-2422-7671-ba08-72500a2b73ae",
+        "itemType": "userMessage"
+      },
+      {
+        "type": "item/completed",
+        "at": "2026-09-09T13:20:57.901Z",
+        "threadId": "01a08654-239b-7b72-ae93-50f8dd719b90",
+        "turnId": "01a08654-2422-7671-ba08-72500a2b73ae",
+        "itemType": "userMessage"
+      }
+    ],
+    "droppedEventCount": 0,
+    "outputBytes": 572153
+  },
+  "gitBefore": {
+    "headSha": "f374c244649799af32b206e4d26aca3a297ba061",
+    "treeSha": "2c7eaf131a7ef140b955d5e3b8373002abc390c7",
+    "dirty": false
+  },
+  "gitAfter": {
+    "headSha": "f374c244649799af32b206e4d26aca3a297ba061",
+    "treeSha": "2c7eaf131a7ef140b955d5e3b8373002abc390c7",
+    "dirty": false
+  }
+}

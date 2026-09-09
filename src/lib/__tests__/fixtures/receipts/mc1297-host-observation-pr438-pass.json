@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "host_observation_of_native_release_review",
+  "note": "Integrator (claude-code/mc-improve-A) host observation. status/decision/session copied verbatim from the wrapper result.json; exitCode is the observed child exit of babysential-codex-release.sh.",
+  "status": "completed",
+  "exitCode": 0,
+  "sessionRef": "codex:01a08695-fe5e-7370-b59f-22a7ea231292",
+  "decision": "pass",
+  "runId": "c8a685f7-d7d3-467b-b9f1-8b3cfe77fd52",
+  "nativeResultRef": "/Users/inesskogbrynet/.openclaw/state/babysential-codex-review/perPR/438/c8a685f7-d7d3-467b-b9f1-8b3cfe77fd52/result.json",
+  "pr": 438,
+  "task": 1297,
+  "headSha": "a538bf870b3381e27ab035b75f0f26b48fa5e5db",
+  "observedAt": "2026-09-09T14:36:49.572Z"
+}

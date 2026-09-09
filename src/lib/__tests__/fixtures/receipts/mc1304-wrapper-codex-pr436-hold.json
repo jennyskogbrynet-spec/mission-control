@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "runId": "6807bc77-4193-4490-b16a-370b81e5cc67",
+  "requestSha256": "dfa39c790a58317e46242ba8754a15d33d883370f09f5919cae3943f287b0b41",
+  "completedAt": "2026-09-09T12:52:22.638Z",
+  "native": {
+    "mechanism": "turn/start+outputSchema",
+    "status": "completed",
+    "decision": "hold",
+    "review": {
+      "decision": "hold",
+      "summary": "Inspected the full diff, relevant callers and tests; candidate and policy identifiers match. No product regression found. Required acceptance artifacts are missing. No test suites, build, browser or production checks were independently run.",
+      "findings": [
+        {
+          "priority": "P2",
+          "file": "reports/lane-a/436/vitest.log",
+          "line": 1,
+          "description": "The referenced reports/lane-a/436 directory is absent, including typecheck.log, vitest.log and ci-*.json. The packet's reported successes cannot be verified. Supply readable acceptance artifacts tied to d733d3420ab0301161c4b32058cf42c5c2f28ad5 before approval."
+        },
+        {
+          "priority": "P3",
+          "file": "__tests__/tools/nibble-discoverability.test.tsx",
+          "line": 97,
+          "description": "NIBBLE_TABS has no production consumers. The hub renders NibbleAppNav and links to allergens through NibbleDashboard, so this assertion stays green if the actual hub link disappears. Assert the rendered dashboard link to protect the navigation behavior named by this test."
+        }
+      ]
+    },
+    "requestedModel": "gpt-6-astra",
+    "observedModel": "gpt-6-astra",
+    "accountBefore": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "accountAfter": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "sourceThreadId": "01a08637-2625-7303-a89d-d8ca60674696",
+    "reviewThreadId": "01a08637-2625-7303-a89d-d8ca60674696",
+    "turnId": "01a08637-26fb-7af1-9c22-a373a06a96a4",
+    "terminal": {
+      "method": "turn/completed",
+      "threadId": "01a08637-2625-7303-a89d-d8ca60674696",
+      "turn": {
+        "id": "01a08637-26fb-7af1-9c22-a373a06a96a4",
+        "status": "completed",
+        "startedAt": 1788958156,
+        "completedAt": 1788958342,
+        "durationMs": 186018
+      }
+    },
+    "exitedReviewMode": null,
+    "childExit": {
+      "observed": true,
+      "code": 0,
+      "signal": null
+    },
+    "errorCode": null,
+    "operationalEvents": [
+      {
+        "type": "starting",
+        "at": "2026-09-09T12:49:16.253Z"
+      },
+      {
+        "type": "mcp_disabled_verified",
+        "at": "2026-09-09T12:49:16.536Z",
+        "count": 4
+      },
+      {
+        "type": "turn/started",
+        "at": "2026-09-09T12:49:16.546Z",
+        "threadId": "01a08637-2625-7303-a89d-d8ca60674696",
+        "turnId": "01a08637-26fb-7af1-9c22-a373a06a96a4",
+        "itemType": null
+      },
+      {
+        "type": "item/started",
+        "at": "2026-09-09T12:49:18.181Z",
+        "threadId": "01a08637-2625-7303-a89d-d8ca60674696",
+        "turnId": "01a08637-26fb-7af1-9c22-a373a06a96a4",
+        "itemType": "userMessage"
+      },
+      {
+        "type": "item/completed",
+        "at": "2026-09-09T12:49:18.182Z",
+        "threadId": "01a08637-2625-7303-a89d-d8ca60674696",
+        "turnId": "01a08637-26fb-7af1-9c22-a373a06a96a4",
+        "itemType": "userMessage"
+      }
+    ],
+    "droppedEventCount": 0,
+    "outputBytes": 454555
+  },
+  "gitBefore": {
+    "headSha": "d733d3420ab0301161c4b32058cf42c5c2f28ad5",
+    "treeSha": "355dcf660d9a022904cb30ffb28e274b13a7cc8c",
+    "dirty": false
+  },
+  "gitAfter": {
+    "headSha": "d733d3420ab0301161c4b32058cf42c5c2f28ad5",
+    "treeSha": "355dcf660d9a022904cb30ffb28e274b13a7cc8c",
+    "dirty": false
+  }
+}

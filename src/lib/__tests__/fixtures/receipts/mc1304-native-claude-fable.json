@@ -1,0 +1,55 @@
+{
+  "status": "completed",
+  "exitCode": 0,
+  "sessionId": "b2cf90aa-ac12-44b3-a719-e830fa139f1b",
+  "sessionRef": "claude-code:b2cf90aa-ac12-44b3-a719-e830fa139f1b",
+  "requestedModel": "claude-fable-5-1",
+  "observedModels": [
+    "claude-fable-5-1"
+  ],
+  "identityVerifiedBeforeAndAfter": true,
+  "accountId": "<scrubbed-account-id>",
+  "billingMode": "existing verified Max subscription",
+  "subscriptionCashCharge": null,
+  "startedAt": "2026-09-08T23:53:01.416965+00:00",
+  "completedAt": "2026-09-08T23:54:47.340560+00:00",
+  "stopReason": null,
+  "modelUsage": {
+    "claude-fable-5-1": {
+      "inputTokens": 2073,
+      "outputTokens": 8062,
+      "cacheReadInputTokens": 216905,
+      "cacheCreationInputTokens": 103482,
+      "webSearchRequests": 0,
+      "costUSD": 2.54769625,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "thinkingTokens": 2891,
+      "canonicalModel": "claude-fable-5-1",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permissionDenials": [],
+  "toolCalls": [
+    {
+      "name": "Read",
+      "input": {
+        "file_path": "/Users/inesskogbrynet/tmp/babysential-1304-20260908T2333/worktree/output/playwright/mc1304-review/context.md"
+      }
+    },
+    {
+      "name": "Read",
+      "input": {
+        "file_path": "/Users/inesskogbrynet/tmp/babysential-1304-20260908T2333/worktree/output/playwright/mc1304-review/candidate.diff"
+      }
+    },
+    {
+      "name": "Read",
+      "input": {
+        "file_path": "/Users/inesskogbrynet/tmp/babysential-1304-20260908T2333/worktree/docs/REVIEW_STANDARDS.md"
+      }
+    }
+  ],
+  "report": "/Users/inesskogbrynet/tmp/babysential-1304-20260908T2333/fable-review/report.md"
+}
