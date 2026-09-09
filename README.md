@@ -362,6 +362,8 @@ See [`.env.example`](.env.example) for the complete list. Key variables:
 | `MISSION_CONTROL_DATA_DIR` | No | Directory for all MC data files (DB, tokens, etc.). Use an absolute path with the standalone server to survive rebuilds. |
 | `MC_CLAUDE_HOME` | No | Path to `~/.claude` directory |
 | `MC_ALLOWED_HOSTS` | No | Host allowlist for production |
+| `MC_EVIDENCE_ROOT` | No | Extra durable root for resume-review receipts, absolute and strictly under `$HOME`. Empty keeps the `~/tmp`-only behaviour. See [`docs/evidence-retention.md`](docs/evidence-retention.md) |
+| `MC_HIDDEN_PANELS` | No | Comma-separated panel ids to drop from the nav for this installation (decluttering, not access control). See [`docs/panels.md`](docs/panels.md) |
 | `NEXT_PUBLIC_GATEWAY_OPTIONAL` | No | Run without gateway connection |
 
 *Required for memory browser, log viewer, and gateway features.
