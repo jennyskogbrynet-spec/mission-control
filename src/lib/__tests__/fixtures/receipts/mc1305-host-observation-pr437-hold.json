@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "host_observation_of_native_release_review",
+  "note": "Written by the integrator (claude-code/mc-improve-A). status/decision/sessionRef are copied verbatim from the wrapper's own result.json; exitCode is the observed exit status of the babysential-codex-release.sh child process. The wrapper's result is the authoritative native receipt; this file exists only because MC resume-review reads receipts under ~/tmp with top-level status/exitCode/sessionRef.",
+  "status": "completed",
+  "exitCode": 1,
+  "exitCodeMeaning": "babysential-codex-release.sh exits non-zero on a HOLD decision; the native turn itself completed",
+  "sessionRef": "codex:01a08654-239b-7b72-ae93-50f8dd719b90",
+  "decision": "hold",
+  "runId": "fe048d7c-70e1-4946-9b9b-dc1134de61f0",
+  "nativeResultRef": "/Users/inesskogbrynet/.openclaw/state/babysential-codex-review/perPR/437/fe048d7c-70e1-4946-9b9b-dc1134de61f0/result.json",
+  "pr": 437,
+  "task": 1305,
+  "headSha": "f374c244649799af32b206e4d26aca3a297ba061",
+  "observedAt": "2026-09-09T13:23:45.334Z"
+}

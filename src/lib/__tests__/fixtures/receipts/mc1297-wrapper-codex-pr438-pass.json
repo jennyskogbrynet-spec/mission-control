@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "runId": "c8a685f7-d7d3-467b-b9f1-8b3cfe77fd52",
+  "requestSha256": "5d92f3ecdf48a35e2331e0f9f8f4cc1532c3af4800c05070e86b4d3ea0e9e9ba",
+  "completedAt": "2026-09-09T14:36:49.572Z",
+  "native": {
+    "mechanism": "turn/start+outputSchema",
+    "status": "completed",
+    "decision": "pass",
+    "review": {
+      "decision": "pass",
+      "summary": "Reviewed all 13 changed files, relevant callers/tests, and supplied evidence for a538bf87 against 1a430a88. No blocking defects found; PR435’s hydration invalidation fix is included. Inspected integrator logs for 64 passing feeding tests, required CI, and compiled Chromium checks; did not rerun tests or browsers. Production, authenticated cloud/RLS, Safari, and multi-device behavior remain unverified.",
+      "findings": []
+    },
+    "requestedModel": "gpt-6-astra",
+    "observedModel": "gpt-6-astra",
+    "accountBefore": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "accountAfter": {
+      "type": "chatgpt",
+      "emailHash": "<scrubbed-email-hash>",
+      "planType": "pro"
+    },
+    "sourceThreadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+    "reviewThreadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+    "turnId": "01a08695-fef0-7b63-b0d5-9975d317ac5e",
+    "terminal": {
+      "method": "turn/completed",
+      "threadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+      "turn": {
+        "id": "01a08695-fef0-7b63-b0d5-9975d317ac5e",
+        "status": "completed",
+        "startedAt": 1788964372,
+        "completedAt": 1788964608,
+        "durationMs": 236628
+      }
+    },
+    "exitedReviewMode": null,
+    "childExit": {
+      "observed": true,
+      "code": 0,
+      "signal": null
+    },
+    "errorCode": null,
+    "operationalEvents": [
+      {
+        "type": "starting",
+        "at": "2026-09-09T14:32:52.012Z"
+      },
+      {
+        "type": "mcp_disabled_verified",
+        "at": "2026-09-09T14:32:52.206Z",
+        "count": 4
+      },
+      {
+        "type": "turn/started",
+        "at": "2026-09-09T14:32:52.210Z",
+        "threadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+        "turnId": "01a08695-fef0-7b63-b0d5-9975d317ac5e",
+        "itemType": null
+      },
+      {
+        "type": "item/started",
+        "at": "2026-09-09T14:32:54.212Z",
+        "threadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+        "turnId": "01a08695-fef0-7b63-b0d5-9975d317ac5e",
+        "itemType": "userMessage"
+      },
+      {
+        "type": "item/completed",
+        "at": "2026-09-09T14:32:54.213Z",
+        "threadId": "01a08695-fe5e-7370-b59f-22a7ea231292",
+        "turnId": "01a08695-fef0-7b63-b0d5-9975d317ac5e",
+        "itemType": "userMessage"
+      }
+    ],
+    "droppedEventCount": 0,
+    "outputBytes": 630508
+  },
+  "gitBefore": {
+    "headSha": "a538bf870b3381e27ab035b75f0f26b48fa5e5db",
+    "treeSha": "6158c13a2836fc07917c63828befc806020a0655",
+    "dirty": false
+  },
+  "gitAfter": {
+    "headSha": "a538bf870b3381e27ab035b75f0f26b48fa5e5db",
+    "treeSha": "6158c13a2836fc07917c63828befc806020a0655",
+    "dirty": false
+  }
+}
