@@ -66,9 +66,28 @@ as proof_:
 
 An unusable value (relative, missing, containing `..`) is **ignored** rather
 than fatal, so a typo degrades to the previous behaviour instead of making every
-review unresumable. An over-broad value is ignored too: `/`, the home
-directory, and `~/tmp` itself are rejected, because a root that contains
-everything makes containment meaningless. All of this is pinned in
+review unresumable.
+
+An over-broad or disposable value is ignored too. After `realpath`
+normalisation the root is trusted **only when it lies strictly under `$HOME`**
+and is not itself a sweepable location. Refused, with the reason:
+
+| Value | Why it is refused |
+| --- | --- |
+| `/` | contains everything, so containment would mean nothing |
+| `$HOME` | trusts the entire home directory |
+| `/Users`, or any other ancestor of `$HOME` | strictly wider than the `$HOME` case above |
+| `/tmp/...`, `/private/tmp/...` | outside `$HOME`, and clearable by any disk sweep |
+| `~/tmp`, and anything under it | the disposable root this variable exists to escape |
+
+An earlier version of this paragraph described the breadth rule generally while
+the code only compared for equality against `/`, `$HOME` and `~/tmp` — so
+`MC_EVIDENCE_ROOT=/Users` was cleared and quietly widened containment to the
+whole home directory. The rule is now a containment test rather than a list of
+values, and the table above is the list it produces.
+
+Accepted, and the value this variable exists for:
+`$HOME/.openclaw/mission-control/evidence`. All of this is pinned in
 `src/lib/__tests__/task-review-resume.test.ts`.
 
 ## `scripts/evidence-retention.py`

@@ -1,6 +1,14 @@
 // @vitest-environment node
 import Database from 'better-sqlite3'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { NextRequest } from 'next/server'
@@ -567,7 +575,9 @@ describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
 
   beforeEach(async () => {
     actual = await vi.importActual<typeof import('../task-review-resume')>('../task-review-resume')
-    scratch = mkdtempSync(path.join(tmpdir(), 'mc-evidence-root-'))
+    // Under $HOME on purpose: a trusted root is only accepted there, so a
+    // scratch dir in the system temp root could no longer stand in for one.
+    scratch = mkdtempSync(path.join(homedir(), '.mc-evidence-root-test-'))
     delete process.env.MC_EVIDENCE_ROOT
   })
 
@@ -640,7 +650,29 @@ describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
   })
 
   it('ignores an unusable or over-broad evidence root instead of trusting it', () => {
-    for (const value of [
+    const realHome = realpathSync(homedir())
+    // Real directories, because a root that does not exist is refused for the
+    // wrong reason and would prove nothing about the breadth rule.
+    const madeHere: string[] = []
+    const madeIfPossible = (parent: string, prefix: string): string | null => {
+      try {
+        const dir = mkdtempSync(path.join(realpathSync(parent), prefix))
+        madeHere.push(dir)
+        return dir
+      } catch {
+        return null
+      }
+    }
+    // An ancestor of $HOME (`/Users` here): not the filesystem root, not equal
+    // to $HOME, and strictly wider than $HOME — the gap this test closes.
+    const homeAncestor = path.dirname(realHome)
+    // Inside the disposable root this variable exists to escape.
+    const underHomeTmp = madeIfPossible(tmpRoot, 'mc-evidence-under-home-tmp-')
+    // The system temp root (`/private/tmp` on macOS): outside $HOME, and a
+    // directory any disk sweep is entitled to clear.
+    const underSystemTmp = madeIfPossible('/tmp', 'mc-evidence-under-system-tmp-')
+
+    const values = [
       '',
       '   ',
       'relative/path',
@@ -648,10 +680,39 @@ describe('defaultResumeEvidenceDeps + MC_EVIDENCE_ROOT', () => {
       `${scratch}/../traversal`,
       '/',
       homedir(),
+      realHome,
+      homeAncestor,
       tmpRoot,
-    ]) {
-      process.env.MC_EVIDENCE_ROOT = value
-      expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot])
+      underHomeTmp,
+      underSystemTmp,
+    ].filter((value): value is string => value !== null)
+
+    try {
+      for (const value of values) {
+        process.env.MC_EVIDENCE_ROOT = value
+        // Soft, so one run names every value that leaks through rather than
+        // stopping at the first and hiding the rest.
+        expect.soft(actual.defaultResumeEvidenceDeps().receiptRoots, value).toEqual([tmpRoot])
+      }
+    } finally {
+      for (const dir of madeHere) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('trusts a durable root that lies strictly under $HOME', () => {
+    // The same shape as the production value,
+    // $HOME/.openclaw/mission-control/evidence, built inside a scratch home so
+    // the test owns every byte it touches.
+    const canonical = path.join(scratch, '.openclaw', 'mission-control', 'evidence')
+    mkdirSync(canonical, { recursive: true })
+    process.env.MC_EVIDENCE_ROOT = canonical
+    expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot, canonical])
+
+    // And the literal production path, on a machine that already has one.
+    const production = path.join(homedir(), '.openclaw', 'mission-control', 'evidence')
+    if (existsSync(production)) {
+      process.env.MC_EVIDENCE_ROOT = production
+      expect(actual.defaultResumeEvidenceDeps().receiptRoots).toEqual([tmpRoot, production])
     }
   })
 })

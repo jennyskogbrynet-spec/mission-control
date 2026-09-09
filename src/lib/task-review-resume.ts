@@ -99,6 +99,12 @@ export type ResumeEvidenceResult =
 /** Operator-configured durable evidence root, in addition to `~/tmp`. */
 export const EVIDENCE_ROOT_ENV = 'MC_EVIDENCE_ROOT'
 
+/** True when `target` sits inside `root`, and is not `root` itself. */
+function strictlyUnder(target: string, root: string): boolean {
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep
+  return target !== root && target.startsWith(prefix)
+}
+
 /**
  * Resolve `MC_EVIDENCE_ROOT` into an extra trusted receipt root, or null.
  *
@@ -110,9 +116,12 @@ export const EVIDENCE_ROOT_ENV = 'MC_EVIDENCE_ROOT'
  * every root is still refused.
  *
  * An unusable value is ignored rather than fatal, so a typo degrades to today's
- * behaviour instead of making every review unresumable. An over-broad value is
- * ignored too: a root that is the filesystem root or the whole home directory
- * would make containment meaningless.
+ * behaviour instead of making every review unresumable. An over-broad or
+ * disposable value is ignored too: after realpath normalisation the root is
+ * trusted only when it lies strictly inside the home directory and is not
+ * itself sweepable. That refuses `/` and `$HOME`, but also every ancestor of
+ * `$HOME` (`/Users`), which is strictly wider than the `$HOME` case and was the
+ * gap an earlier equality-only check left open.
  */
 function configuredEvidenceRoot(home: string): string | null {
   const raw = process.env[EVIDENCE_ROOT_ENV]?.trim()
@@ -126,13 +135,30 @@ function configuredEvidenceRoot(home: string): string | null {
     return null
   }
 
-  if (resolved === path.parse(resolved).root) return null
-  for (const overBroad of [home, path.join(home, 'tmp')]) {
+  let realHome: string
+  try {
+    realHome = realpathSync(home)
+  } catch {
+    return null
+  }
+
+  // Strictly inside $HOME. This is the single breadth rule: it refuses `/`,
+  // `$HOME` itself, and any ancestor of it, without enumerating them.
+  if (!strictlyUnder(resolved, realHome)) return null
+
+  // Disposable locations are refused even when they sit inside $HOME: `~/tmp`
+  // is the sweepable root this variable exists to escape, and the system temp
+  // root is no more durable. `/tmp` resolves to `/private/tmp` on macOS, so
+  // both spellings are covered by resolving before comparing.
+  for (const disposable of [path.join(realHome, 'tmp'), '/tmp']) {
+    let realDisposable: string
     try {
-      if (resolved === realpathSync(overBroad)) return null
+      realDisposable = realpathSync(disposable)
     } catch {
-      // A root that does not resolve cannot collide with this one.
+      // A directory that does not resolve cannot contain this one.
+      continue
     }
+    if (resolved === realDisposable || strictlyUnder(resolved, realDisposable)) return null
   }
   return raw
 }
