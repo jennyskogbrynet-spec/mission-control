@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { isValidProjectDeadline } from '@/lib/project-deadline'
 import { getDatabase } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { mutationLimiter } from '@/lib/rate-limit'
@@ -14,8 +15,8 @@ function normalizePrefix(input: string): string {
 }
 
 function toProjectId(raw: string): number {
-  const id = Number.parseInt(raw, 10)
-  return Number.isFinite(id) ? id : NaN
+  const id = Number(raw)
+  return /^[1-9]\d*$/.test(raw) && Number.isSafeInteger(id) ? id : NaN
 }
 
 export async function GET(
@@ -52,7 +53,7 @@ export async function GET(
     const row = db.prepare(`
       SELECT p.id, p.workspace_id, p.name, p.slug, p.description, p.ticket_prefix, p.ticket_counter, p.status,
              p.github_repo, p.deadline, p.color, p.github_sync_enabled, p.github_labels_initialized, p.github_default_branch, p.created_at, p.updated_at,
-             (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
+             (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.workspace_id = p.workspace_id) as task_count,
              (SELECT GROUP_CONCAT(paa.agent_name) FROM project_agent_assignments paa WHERE paa.project_id = p.id) as assigned_agents_csv
       FROM projects p
       WHERE p.id = ? AND p.workspace_id = ?
@@ -111,14 +112,13 @@ export async function PATCH(
 
     const current = db.prepare(`SELECT * FROM projects WHERE id = ? AND workspace_id = ?`).get(projectId, workspaceId) as any
     if (!current) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    const body = await request.json()
     if (current.slug === 'general' && current.workspace_id === workspaceId && current.id === projectId) {
-      const body = await request.json()
       if (body?.status === 'archived') {
         return NextResponse.json({ error: 'Default project cannot be archived' }, { status: 400 })
       }
     }
 
-    const body = await request.json()
     const updates: string[] = []
     const paramsList: Array<string | number | null> = []
 
@@ -154,8 +154,9 @@ export async function PATCH(
       paramsList.push(typeof body.github_repo === 'string' ? body.github_repo.trim() || null : null)
     }
     if (body?.deadline !== undefined) {
+      if (!isValidProjectDeadline(body.deadline)) return NextResponse.json({ error: 'deadline must be whole Unix seconds within years 0001–9999, or null' }, { status: 400 })
       updates.push('deadline = ?')
-      paramsList.push(typeof body.deadline === 'number' ? body.deadline : null)
+      paramsList.push(body.deadline)
     }
     if (body?.color !== undefined) {
       updates.push('color = ?')

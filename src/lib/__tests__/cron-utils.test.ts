@@ -102,6 +102,104 @@ describe('validateCronExpression', () => {
     expect(result).not.toBeNull()
     expect(result).toContain('month')
   })
+
+  it('returns null for valid range with step 0 9-17/2 * * 1-5', () => {
+    expect(validateCronExpression('0 9-17/2 * * 1-5')).toBeNull()
+  })
+
+  it('returns error for decimal value', () => {
+    const result = validateCronExpression('1.5 * * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('minute')
+  })
+
+  it('returns error for decimal inside a range', () => {
+    expect(validateCronExpression('0 1.5-2 * * *')).not.toBeNull()
+  })
+
+  it('returns error for empty comma-separated entry', () => {
+    const result = validateCronExpression('1,,30 * * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('minute')
+  })
+
+  it('returns error for trailing comma', () => {
+    expect(validateCronExpression('0,15, * * * *')).not.toBeNull()
+  })
+
+  it('returns error for reversed range 50-10', () => {
+    const result = validateCronExpression('50-10 * * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('minute')
+  })
+
+  it('returns error for reversed in-bounds range 20-5', () => {
+    expect(validateCronExpression('* 20-5 * * *')).not.toBeNull()
+  })
+
+  it('returns null for day-of-week 7', () => {
+    expect(validateCronExpression('0 9 * * 7')).toBeNull()
+  })
+
+  it('returns null for day-of-week range 1-7', () => {
+    expect(validateCronExpression('0 9 * * 1-7')).toBeNull()
+  })
+
+  it('returns error for day-of-week 8', () => {
+    const result = validateCronExpression('0 9 * * 8')
+    expect(result).not.toBeNull()
+    expect(result).toContain('day of week')
+  })
+
+  it('returns null for day-of-week range with step 1-5/2', () => {
+    expect(validateCronExpression('0 9 * * 1-5/2')).toBeNull()
+  })
+
+  it('returns error for zero step value */0', () => {
+    const result = validateCronExpression('*/0 * * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('step')
+  })
+
+  it('returns error for negative step value */-2', () => {
+    expect(validateCronExpression('*/-2 * * * *')).not.toBeNull()
+  })
+
+  it('returns error for zero step on a range 9-17/0', () => {
+    expect(validateCronExpression('0 9-17/0 * * *')).not.toBeNull()
+  })
+
+  it('returns error for negative number', () => {
+    const result = validateCronExpression('-5 * * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('minute')
+  })
+
+  it('returns error for non-numeric segment', () => {
+    expect(validateCronExpression('a * * * *')).not.toBeNull()
+  })
+
+  it('returns null for comma-separated ranges with steps', () => {
+    expect(validateCronExpression('0-10/5,30 * * * *')).toBeNull()
+  })
+
+  it('returns error for out-of-bounds range endpoint 0-24 in hour', () => {
+    const result = validateCronExpression('0 0-24 * * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('hour')
+  })
+
+  it('returns error for too many fields', () => {
+    const result = validateCronExpression('0 9 * * 1-5 extra')
+    expect(result).not.toBeNull()
+    expect(result).toContain('Expected 5 fields')
+  })
+
+  it('returns error for too few fields', () => {
+    const result = validateCronExpression('0 9 * *')
+    expect(result).not.toBeNull()
+    expect(result).toContain('Expected 5 fields')
+  })
 })
 
 describe('generateCloneName', () => {
@@ -120,4 +218,10 @@ describe('generateCloneName', () => {
   it('is case-insensitive when checking existing names', () => {
     expect(generateCloneName('My Job', ['my job (copy)'])).toBe('My Job (copy 2)')
   })
+})
+
+
+it('rejects unsafe or infinite step sizes', () => {
+  expect(validateCronExpression('*/9007199254740992 * * * *')).not.toBeNull()
+  expect(validateCronExpression(`*/${'9'.repeat(310)} * * * *`)).not.toBeNull()
 })

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { getDatabase, db_helpers } from './db'
 import { runOpenClaw } from './command'
 import { callOpenClawGateway } from './openclaw-gateway'
+import { allowsPaidApiFallback, isManagedComputeTask } from './dispatch-billing-policy'
 import { eventBus } from './event-bus'
 import { logger } from './logger'
 import { config } from './config'
@@ -22,6 +23,80 @@ const DEFAULT_DISPATCH_RESOURCE_POLICY = {
   staleAfterMinutes: 10,
   rateLimitKey: null as string | null,
   zombieReaper: true,
+}
+
+/**
+ * Hard ceiling on agent invocations that Mission Control's own schedulers may
+ * start in a rolling 24h window.
+ *
+ * Every per-task retry counter in this file is a LOCAL bound: it stops one task
+ * from looping forever, but N tasks each retrying within their own budget still
+ * multiply into a runaway. That is exactly how the Aegis review loop drained a
+ * codex subscription on 2026-07-28/29 without a single counter being exceeded.
+ * This ceiling is the global backstop that no per-task logic can talk its way
+ * past. Tune with the `general.agent_invocation_daily_cap` setting.
+ */
+const AGENT_INVOCATION_DEFAULT_DAILY_CAP = 400
+let agentInvocationTableReady = false
+
+function ensureAgentInvocationTable(db: ReturnType<typeof getDatabase>): void {
+  if (agentInvocationTableReady) return
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_invocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      task_id INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_invocations_ts ON agent_invocations(ts);
+  `)
+  agentInvocationTableReady = true
+}
+
+function getAgentInvocationDailyCap(db: ReturnType<typeof getDatabase>): number {
+  try {
+    const row = db
+      .prepare("SELECT value FROM settings WHERE key = 'general.agent_invocation_daily_cap'")
+      .get() as { value: string } | undefined
+    const parsed = row ? parseInt(row.value, 10) : NaN
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : AGENT_INVOCATION_DEFAULT_DAILY_CAP
+  } catch {
+    return AGENT_INVOCATION_DEFAULT_DAILY_CAP
+  }
+}
+
+/** Count of scheduler-started agent invocations in the last 24h. */
+export function getAgentInvocationBudget(): { used: number; cap: number; exceeded: boolean } {
+  const db = getDatabase()
+  ensureAgentInvocationTable(db)
+  const cap = getAgentInvocationDailyCap(db)
+  const since = Math.floor(Date.now() / 1000) - 24 * 60 * 60
+  const used = (db.prepare('SELECT COUNT(*) as n FROM agent_invocations WHERE ts >= ?').get(since) as { n: number }).n
+  return { used, cap, exceeded: used >= cap }
+}
+
+/** Record one scheduler-started agent invocation against the 24h budget. */
+function recordAgentInvocation(source: string, taskId: number | null): void {
+  const db = getDatabase()
+  ensureAgentInvocationTable(db)
+  db.prepare('INSERT INTO agent_invocations (ts, source, task_id) VALUES (?, ?, ?)')
+    .run(Math.floor(Date.now() / 1000), source, taskId)
+  // Keep the table bounded — the budget only ever looks back 24h.
+  db.prepare('DELETE FROM agent_invocations WHERE ts < ?')
+    .run(Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60)
+}
+
+/**
+ * Refuse to start another scheduler-driven agent invocation once the rolling
+ * 24h ceiling is hit. Returns a message to surface, or null when under budget.
+ */
+export function assertAgentInvocationBudget(source: string): string | null {
+  const { used, cap, exceeded } = getAgentInvocationBudget()
+  if (!exceeded) return null
+  const message = `Agent invocation budget exhausted: ${used}/${cap} in the last 24h. ${source} paused. Raise general.agent_invocation_daily_cap to override.`
+  logger.error({ source, used, cap }, 'Agent invocation budget exhausted — scheduler paused')
+  eventBus.broadcast('scheduler.budget_exhausted', { source, used, cap })
+  return message
 }
 
 /** Sync task to GitHub/GNAP and broadcast escalation if task failed */
@@ -377,6 +452,27 @@ function getAgentSoulContent(task: DispatchableTask): string | null {
   }
 }
 
+/** Persist a future direct-API receipt using the migrated attribution schema. */
+export function recordDirectDispatchUsage(
+  task: Pick<DispatchableTask, 'id' | 'agent_name' | 'workspace_id'>,
+  model: string,
+  usage: { input_tokens?: number; output_tokens?: number },
+): void {
+  try {
+    getDatabase().prepare(`
+      INSERT INTO token_usage (model, session_id, input_tokens, output_tokens, cost_usd, created_at, workspace_id, agent_name, task_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      model, `task-${task.id}`, usage.input_tokens || 0, usage.output_tokens || 0,
+      null, // The response reports tokens, not a billed cost. Unknown is not zero.
+      Math.floor(Date.now() / 1000), task.workspace_id, task.agent_name, task.id,
+    )
+  } catch (err) {
+    // Do not retry a paid model invocation because receipt storage failed.
+    logger.warn({ err, taskId: task.id }, 'Could not persist direct-dispatch token usage')
+  }
+}
+
 async function callClaudeDirectly(
   task: DispatchableTask,
   prompt: string,
@@ -444,23 +540,7 @@ async function callClaudeDirectly(
 
   // Record token usage
   if (data.usage) {
-    try {
-      const db = getDatabase()
-      const now = Math.floor(Date.now() / 1000)
-      db.prepare(`
-        INSERT INTO token_usage (model, session_id, input_tokens, output_tokens, total_tokens, cost, created_at, workspace_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        model,
-        `task-${task.id}`,
-        data.usage.input_tokens || 0,
-        data.usage.output_tokens || 0,
-        (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
-        0, // cost calculated separately
-        now,
-        task.workspace_id,
-      )
-    } catch { /* non-fatal */ }
+    recordDirectDispatchUsage(task, model, data.usage)
   }
 
   return { text, sessionId: null }
@@ -527,345 +607,20 @@ function normalizeGatewayAgentId(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase().replace(/\s+/g, '-')
 }
 
-function getConfiguredReviewFallbackAgentId(
-  db: ReturnType<typeof getDatabase>,
-  workspaceId: number,
-): string | null {
-  const configuredTarget = (
-    db
-      .prepare("SELECT value FROM settings WHERE key = 'chat.coordinator_target_agent'")
-      .get() as { value?: string } | undefined
-  )?.value?.trim()
-
-  if (!configuredTarget) return null
-
-  const wanted = normalizeGatewayAgentId(configuredTarget)
-  const agents = db
-    .prepare('SELECT name, config FROM agents WHERE workspace_id = ?')
-    .all(workspaceId) as Array<{ name: string; config?: string | null }>
-
-  for (const agent of agents) {
-    let openclawId: string | null = null
-    if (agent.config) {
-      try {
-        const cfg = JSON.parse(agent.config)
-        if (typeof cfg.openclawId === 'string' && cfg.openclawId.trim()) {
-          openclawId = cfg.openclawId.trim()
-        }
-      } catch { /* ignore */ }
-    }
-
-    if (
-      normalizeGatewayAgentId(agent.name) === wanted ||
-      normalizeGatewayAgentId(openclawId) === wanted
-    ) {
-      return openclawId || normalizeGatewayAgentId(agent.name)
-    }
-  }
-
-  return configuredTarget
-}
-
-function buildReviewPrompt(task: ReviewableTask): string {
-  const ticket = task.ticket_prefix && task.project_ticket_no
-    ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
-    : `TASK-${task.id}`
-
-  const lines = [
-    'You are Aegis, the quality reviewer for Mission Control.',
-    'Review the following completed task and its resolution.',
-    '',
-    `**[${ticket}] ${task.title}**`,
-  ]
-
-  if (task.description) {
-    lines.push('', '## Task Description', task.description)
-  }
-
-  if (task.resolution) {
-    lines.push('', '## Agent Resolution', task.resolution.substring(0, 6000))
-  }
-
-  lines.push(
-    '',
-    '## Instructions',
-    'Evaluate whether the agent\'s response adequately addresses the task.',
-    'Respond with EXACTLY one of these two formats:',
-    '',
-    'If the work is acceptable:',
-    'VERDICT: APPROVED',
-    'NOTES: <brief summary of why it passes>',
-    '',
-    'If the work needs improvement:',
-    'VERDICT: REJECTED',
-    'NOTES: <specific issues that need to be fixed>',
-  )
-
-  return lines.join('\n')
-}
-
-function parseReviewVerdict(text: string): { status: 'approved' | 'rejected' | 'in_progress'; notes: string } {
-  const upper = text.toUpperCase()
-  const status = upper.includes('VERDICT: APPROVED')
-    ? 'approved' as const
-    : upper.includes('VERDICT: IN_PROGRESS') || upper.includes('VERDICT: IN PROGRESS') || upper.includes('STATUS: IN_PROGRESS')
-      ? 'in_progress' as const
-      : 'rejected' as const
-  const notesMatch = text.match(/NOTES:\s*(.+)/i)
-  const notes = notesMatch?.[1]?.trim().substring(0, 2000) || (status === 'approved' ? 'Quality check passed' : status === 'in_progress' ? 'Agent still in progress' : 'Quality check failed')
-  return { status, notes }
-}
-
-/**
- * Run Aegis quality reviews on tasks in 'review' status.
- * Uses an agent to evaluate the task resolution, then approves or rejects.
- */
-export async function runAegisReviews(): Promise<{ ok: boolean; message: string }> {
-  const db = getDatabase()
-
-  const tasks = db.prepare(`
-    SELECT t.id, t.title, t.description, t.status, t.priority, t.resolution, t.assigned_to, t.workspace_id,
-           t.claim_state, t.claimed_at, t.claimed_by, t.updated_at,
-           t.project_id, p.ticket_prefix, t.project_ticket_no, a.config as agent_config
-    FROM tasks t
-    LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
-    LEFT JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
-    WHERE t.status = 'review'
-    ORDER BY t.updated_at ASC
-    LIMIT 3
-  `).all() as ReviewableTask[]
-
-  if (tasks.length === 0) {
-    return { ok: true, message: 'No tasks awaiting review' }
-  }
-
-  const results: Array<{ id: number; verdict: string; error?: string }> = []
-
-  for (const task of tasks) {
-    // Move to quality_review to prevent re-processing
-    db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-      .run('quality_review', Math.floor(Date.now() / 1000), task.id)
-
-    eventBus.broadcast('task.status_changed', {
-      id: task.id,
-      status: 'quality_review',
-      previous_status: 'review',
-    })
-
-    try {
-      const prompt = buildReviewPrompt(task)
-      let agentResponse: AgentResponseParsed
-
-      // Separation of duties (server-side): the agent that did or claimed the
-      // work must never review it. Prefer an independent gateway reviewer,
-      // fall back to a direct Claude API review, and with neither available
-      // park the task for the owner instead of letting it self-approve.
-      const implementerIds = collectImplementerAgentIds(task)
-      let gatewayReviewAgent: string | null = null
-      if (isGatewayAvailable()) {
-        const reviewFallbackAgentId = getConfiguredReviewFallbackAgentId(db, task.workspace_id)
-        const resolved = resolveGatewayAgentIdForReview(task, reviewFallbackAgentId)
-        if (!implementerIds.has(normalizeGatewayAgentId(resolved))) {
-          gatewayReviewAgent = resolved
-        } else if (reviewFallbackAgentId && !implementerIds.has(normalizeGatewayAgentId(reviewFallbackAgentId))) {
-          gatewayReviewAgent = reviewFallbackAgentId
-        }
-      }
-
-      if (!gatewayReviewAgent && getAnthropicApiKey()) {
-        // Direct Claude API review — independent of the implementing agent
-        const reviewTask: DispatchableTask = {
-          id: task.id, title: task.title, description: task.description,
-          status: 'quality_review', priority: 'high', assigned_to: 'aegis',
-          workspace_id: task.workspace_id, agent_name: 'aegis', agent_id: 0,
-          agent_config: null, ticket_prefix: task.ticket_prefix,
-          project_ticket_no: task.project_ticket_no, project_id: null,
-        }
-        agentResponse = await callClaudeDirectly(reviewTask, prompt)
-      } else if (!gatewayReviewAgent) {
-        // No independent reviewer available — park for owner triage rather
-        // than routing the review to the implementer.
-        const now = Math.floor(Date.now() / 1000)
-        db.prepare('UPDATE tasks SET status = ?, error_message = ?, updated_at = ? WHERE id = ?')
-          .run(
-            'awaiting_owner',
-            'Aegis separation of duties: no independent reviewer available (review routing resolved to the implementing agent and no direct API key is configured).',
-            now,
-            task.id,
-          )
-        eventBus.broadcast('task.status_changed', {
-          id: task.id,
-          status: 'awaiting_owner',
-          previous_status: 'quality_review',
-          updated_at: now,
-          reason: 'aegis_no_independent_reviewer',
-        })
-        results.push({ id: task.id, verdict: 'deferred', error: 'no independent reviewer' })
-        logger.warn({ taskId: task.id }, 'Aegis review parked: no independent reviewer available')
-        continue
-      } else {
-        const invokeParams = {
-          message: prompt,
-          agentId: gatewayReviewAgent,
-          // Stable per task revision so gateway-side dedupe absorbs re-sends of
-          // the same review; a new revision (updated_at change) mints a new key.
-          idempotencyKey: `aegis-review-${task.id}-${task.updated_at ?? 0}`,
-          deliver: false,
-        }
-        const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', String(TASK_DISPATCH_TIMEOUT_MS), '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: TASK_DISPATCH_TIMEOUT_MS + 5_000 }
-        )
-        const finalPayload = parseGatewayJson(finalResult.stdout)
-          ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
-        agentResponse = parseAgentResponse(
-          finalPayload?.result ? JSON.stringify(finalPayload.result) : finalResult.stdout
-        )
-      }
-
-      if (!agentResponse.text) {
-        throw new Error('Aegis review returned empty response')
-      }
-
-      const verdict = parseReviewVerdict(agentResponse.text)
-
-      if (verdict.status === 'in_progress') {
-        const now = Math.floor(Date.now() / 1000)
-        db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-          .run('review', now, task.id)
-        eventBus.broadcast('task.status_changed', {
-          id: task.id,
-          status: 'review',
-          previous_status: 'quality_review',
-          updated_at: now,
-          reason: 'aegis_in_progress_wait',
-        })
-        results.push({ id: task.id, verdict: 'in_progress' })
-        logger.info({ taskId: task.id }, 'Aegis review deferred: reviewer reported in_progress')
-        continue
-      }
-
-      if (verdict.status === 'rejected') {
-        const { active, claimAgeMs } = isActiveClaim(task.claim_state, task.claimed_at)
-        if (active) {
-          const now = Math.floor(Date.now() / 1000)
-          db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-            .run('review', now, task.id)
-          eventBus.broadcast('task.status_changed', {
-            id: task.id,
-            status: 'review',
-            previous_status: 'quality_review',
-            updated_at: now,
-            reason: 'agent_active',
-            claim_age_ms: claimAgeMs,
-          })
-          results.push({ id: task.id, verdict: 'deferred' })
-          logger.info(
-            { taskId: task.id, claim_age_ms: claimAgeMs },
-            'Aegis rejection deferred: assigned agent claim is still active',
-          )
-          continue
-        }
-      }
-
-      // Insert quality review record
-      db.prepare(`
-        INSERT INTO quality_reviews (task_id, reviewer, status, notes, workspace_id)
-        VALUES (?, 'aegis', ?, ?, ?)
-      `).run(task.id, verdict.status, verdict.notes, task.workspace_id)
-
-      if (verdict.status === 'approved') {
-        const doneAt = Math.floor(Date.now() / 1000)
-        db.prepare(`UPDATE tasks SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?), ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
-          .run('done', doneAt, doneAt, task.id)
-
-        eventBus.broadcast('task.status_changed', {
-          id: task.id,
-          status: 'done',
-          previous_status: 'quality_review',
-        })
-        syncAndEscalateIfFailed(task, 'done')
-      } else {
-        // Rejected: check dispatch_attempts to decide next status
-        const now = Math.floor(Date.now() / 1000)
-        const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ?').get(task.id) as { dispatch_attempts: number } | undefined)?.dispatch_attempts ?? 0
-        const newAttempts = currentAttempts + 1
-        const maxAegisRetries = 3
-
-        if (newAttempts >= maxAegisRetries) {
-          // Too many rejections — move to failed
-          db.prepare(`UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ?, ${RELEASE_ACTIVE_CLAIM_ASSIGNMENTS} WHERE id = ?`)
-            .run('failed', `Aegis rejected ${newAttempts} times. Last: ${verdict.notes}`, newAttempts, now, task.id)
-
-          eventBus.broadcast('task.status_changed', {
-            id: task.id,
-            status: 'failed',
-            previous_status: 'quality_review',
-            error_message: `Aegis rejected ${newAttempts} times`,
-            reason: 'max_aegis_retries_exceeded',
-          })
-          syncAndEscalateIfFailed(task, 'failed', `Aegis rejected ${newAttempts} times`, newAttempts)
-        } else {
-          // Requeue to assigned for re-dispatch with feedback
-          db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
-            .run('assigned', `Aegis rejected: ${verdict.notes}`, newAttempts, now, task.id)
-
-          eventBus.broadcast('task.status_changed', {
-            id: task.id,
-            status: 'assigned',
-            previous_status: 'quality_review',
-            error_message: `Aegis rejected: ${verdict.notes}`,
-            reason: 'aegis_rejection',
-          })
-          syncAndEscalateIfFailed(task, 'assigned')
-        }
-
-        // Add rejection as a comment so the agent sees it on next dispatch
-        db.prepare(`
-          INSERT INTO comments (task_id, author, content, created_at, workspace_id)
-          VALUES (?, 'aegis', ?, ?, ?)
-        `).run(task.id, `Quality Review Rejected (attempt ${newAttempts}/${maxAegisRetries}):\n${verdict.notes}`, now, task.workspace_id)
-      }
-
-      db_helpers.logActivity(
-        'aegis_review',
-        'task',
-        task.id,
-        'aegis',
-        `Aegis ${verdict.status} task "${task.title}": ${verdict.notes.substring(0, 200)}`,
-        { verdict: verdict.status, notes: verdict.notes },
-        task.workspace_id
-      )
-
-      results.push({ id: task.id, verdict: verdict.status })
-      logger.info({ taskId: task.id, verdict: verdict.status }, 'Aegis review completed')
-    } catch (err: any) {
-      const errorMsg = err.message || 'Unknown error'
-      logger.error({ taskId: task.id, err }, 'Aegis review failed')
-
-      // Revert to review so it can be retried
-      db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-        .run('review', Math.floor(Date.now() / 1000), task.id)
-
-      eventBus.broadcast('task.status_changed', {
-        id: task.id,
-        status: 'review',
-        previous_status: 'quality_review',
-      })
-
-      results.push({ id: task.id, verdict: 'error', error: errorMsg.substring(0, 100) })
-    }
-  }
-
-  const approved = results.filter(r => r.verdict === 'approved').length
-  const rejected = results.filter(r => r.verdict === 'rejected').length
-  const errors = results.filter(r => r.verdict === 'error').length
-
-  return {
-    ok: errors === 0,
-    message: `Reviewed ${tasks.length}: ${approved} approved, ${rejected} rejected${errors ? `, ${errors} error(s)` : ''}`,
-  }
-}
+// REMOVED 2026-07-31: runAegisReviews() — the automated LLM quality-review loop.
+//
+// It selected tasks in 'review' status every 60s and sent each one's full
+// resolution to a gateway agent for an approve/reject verdict. On any reviewer
+// error it reverted the task to 'review', so a broken reviewer became an
+// unbounded retry loop: ~30 tasks re-reviewed every ~65s, ~305k input tokens
+// per call, ~1.14B input tokens over 2026-07-28/29, which drained the codex
+// 20x subscription. Nothing caught it — the usage tracker had been blind since
+// the 2026-07-14 OpenClaw migration and only ever watched cron runs, never
+// Mission Control's own scheduler.
+//
+// Tasks now stay in 'review' for human triage. If an automated reviewer is ever
+// reintroduced it MUST go through assertAgentInvocationBudget() below and carry
+// a bounded per-task error counter.
 
 /**
  * Requeue stale tasks stuck in 'in_progress' whose assigned agent is offline.
@@ -970,6 +725,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
     WHERE t.status = 'assigned'
       AND t.assigned_to IS NOT NULL
+      AND CASE WHEN json_valid(t.metadata) THEN json_type(t.metadata, '$.compute_route') IS NULL ELSE 1 END
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
       t.created_at ASC
@@ -978,6 +734,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   if (tasks.length === 0) {
     return { ok: true, message: 'No assigned tasks to dispatch' }
+  }
+
+  // Global backstop — leave the tasks in 'assigned' and stop rather than keep
+  // spending once the 24h invocation ceiling is reached.
+  const budgetBlock = assertAgentInvocationBudget('task_dispatch')
+  if (budgetBlock) {
+    return { ok: false, message: budgetBlock }
   }
 
   // Parse JSON tags column
@@ -991,13 +754,24 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
   const now = Math.floor(Date.now() / 1000)
 
   for (const task of tasks) {
+    // Account-bound work belongs to the capacity preflight and subscription runner.
+    if (isManagedComputeTask(task.metadata)) continue
     const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
     // Set once the task prompt may have reached the agent. From that point a
     // failure is AMBIGUOUS (the agent may be working) and must not auto-retry.
     let deliveryAttempted = false
-    // Mark as in_progress immediately to prevent re-dispatch
-    db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-      .run('in_progress', now, task.id)
+    // Another dispatcher or editor may have changed this row while an earlier
+    // task in our batch was running. Only the successful claimant may send or
+    // record an invocation; use the same assignee and billing/routing metadata
+    // that were selected, and recheck the compute boundary atomically.
+    const claimed = db.prepare(`
+      UPDATE tasks SET status = ?, updated_at = ?
+      WHERE id = ? AND workspace_id = ? AND status = ? AND assigned_to = ?
+        AND metadata IS ?
+        AND CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.compute_route') IS NULL ELSE 1 END
+    `).run('in_progress', now, task.id, task.workspace_id, 'assigned', task.assigned_to,
+      typeof task.metadata === 'object' && task.metadata !== null ? JSON.stringify(task.metadata) : task.metadata ?? null).changes
+    if (!claimed) continue
 
     eventBus.broadcast('task.status_changed', {
       id: task.id,
@@ -1020,6 +794,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       },
       task.workspace_id
     )
+
+    recordAgentInvocation('task_dispatch', task.id)
 
     try {
       // Check for previous Aegis rejection feedback
@@ -1045,6 +821,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       let agentResponse: AgentResponseParsed
       const useDirectApi = !isGatewayAvailable() && getAnthropicApiKey()
+        && allowsPaidApiFallback(task.metadata, process.env.MC_ALLOW_PAID_API_FALLBACK)
       const dispatchIdempotencyKey = resolveDispatchIdempotencyKey(db, task.id)
 
       if (useDirectApi && !targetSession) {
@@ -1322,14 +1099,15 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
   const db = getDatabase()
 
   const inboxTasks = db.prepare(`
-    SELECT id, title, description, priority, tags, workspace_id
+    SELECT id, title, description, priority, tags, workspace_id, metadata
     FROM tasks
     WHERE status = 'inbox' AND assigned_to IS NULL
+      AND CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.compute_route') IS NULL ELSE 1 END
     ORDER BY
       CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
       created_at ASC
     LIMIT 5
-  `).all() as Array<{ id: number; title: string; description: string | null; priority: string; tags: string | null; workspace_id: number }>
+  `).all() as Array<{ id: number; title: string; description: string | null; priority: string; tags: string | null; workspace_id: number; metadata: string | null }>
 
   if (inboxTasks.length === 0) {
     return { ok: true, message: 'No inbox tasks to route' }
@@ -1337,11 +1115,10 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
 
   // Get all non-hidden, non-offline agents
   const agents = db.prepare(`
-    SELECT id, name, role, status, config
+    SELECT id, name, role, status, config, workspace_id
     FROM agents
     WHERE hidden = 0 AND status NOT IN ('offline', 'error')
-    LIMIT 50
-  `).all() as Array<{ id: number; name: string; role: string; status: string; config: string | null }>
+  `).all() as Array<{ id: number; name: string; role: string; status: string; config: string | null; workspace_id: number }>
 
   if (agents.length === 0) {
     return { ok: true, message: `${inboxTasks.length} inbox task(s) but no available agents` }
@@ -1351,6 +1128,7 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
   const now = Math.floor(Date.now() / 1000)
 
   for (const task of inboxTasks) {
+    if (isManagedComputeTask(task.metadata)) continue
     const taskText = `${task.title} ${task.description || ''}`
     let parsedTags: string[] = []
     if (task.tags) {
@@ -1360,6 +1138,7 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
 
     // Score each agent
     const scored = agents
+      .filter(a => a.workspace_id === task.workspace_id)
       .map(a => ({ agent: a, score: scoreAgentForTask(a, fullText) }))
       .filter(s => s.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -1382,8 +1161,9 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
         return c < 3
       })
       if (!alt) continue // all agents at capacity
-      db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ?')
-        .run('assigned', alt.agent.name, now, task.id)
+      const changed = db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = ? AND assigned_to IS NULL')
+        .run('assigned', alt.agent.name, now, task.id, task.workspace_id, 'inbox').changes
+      if (!changed) continue
 
       db_helpers.logActivity('task_auto_routed', 'task', task.id, 'scheduler',
         `Auto-assigned "${task.title}" to ${alt.agent.name} (${alt.agent.role}, score: ${alt.score})`,
@@ -1396,8 +1176,9 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
       continue
     }
 
-    db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ?')
-      .run('assigned', best.name, now, task.id)
+    const changed = db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = ? AND assigned_to IS NULL')
+      .run('assigned', best.name, now, task.id, task.workspace_id, 'inbox').changes
+    if (!changed) continue
 
     db_helpers.logActivity('task_auto_routed', 'task', task.id, 'scheduler',
       `Auto-assigned "${task.title}" to ${best.name} (${best.role}, score: ${scored[0].score})`,

@@ -16,7 +16,8 @@ let note:HQNote
 function database() {
   const d=new Database(':memory:')
   d.exec(`
-    CREATE TABLE projects(id INTEGER PRIMARY KEY,workspace_id INTEGER,name TEXT,slug TEXT,status TEXT,description TEXT,color TEXT,ticket_prefix TEXT,ticket_counter INTEGER DEFAULT 0,updated_at INTEGER);
+    CREATE TABLE projects(id INTEGER PRIMARY KEY,workspace_id INTEGER,name TEXT,slug TEXT,status TEXT,description TEXT,color TEXT,github_repo TEXT,deadline INTEGER,ticket_prefix TEXT,ticket_counter INTEGER DEFAULT 0,updated_at INTEGER);
+    CREATE TABLE project_agent_assignments(project_id INTEGER,agent_name TEXT,role TEXT);
     CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id INTEGER,title TEXT,description TEXT,status TEXT,priority TEXT,project_id INTEGER,project_ticket_no INTEGER,assigned_to TEXT,created_by TEXT,created_at INTEGER,updated_at INTEGER,tags TEXT,metadata TEXT,resolution TEXT,completed_at INTEGER);
     CREATE TABLE activities(id INTEGER PRIMARY KEY,workspace_id INTEGER,type TEXT,entity_type TEXT,entity_id INTEGER,actor TEXT,description TEXT,data TEXT,created_at INTEGER);
     CREATE TABLE agents(id INTEGER PRIMARY KEY,workspace_id INTEGER,name TEXT,role TEXT,status TEXT,last_seen INTEGER,updated_at INTEGER);
@@ -75,12 +76,68 @@ describe('HQ tasks use the existing record of work',()=>{
     expect(second.task.id).not.toBe(first.task.id)
     expect(getHQTask(first.task.id,2,db)).toBeNull()
   })
-  it('does not map unrelated or general legacy tasks into project decisions',()=>{
+  it('includes every active project while retaining exact membership and workspace isolation',()=>{
     db.exec(`INSERT INTO tasks(workspace_id,title,status,project_id,metadata,updated_at) VALUES
       (1,'Unrelated task','inbox',5,'{}',1),(1,'General legacy task','inbox',3,'{}',1),(2,'Other workspace','inbox',4,'{}',1)`)
     const created=createHQTask(input(),1,'operator',[note],db)
     const result=readHQOperations(1,[note],db)
-    expect(result.tasks.map(t=>t.id)).toEqual([created.task.id])
+    expect(result.tasks.map(t=>t.title)).toEqual([created.task.title, 'Unrelated task', 'General legacy task'])
+    expect(result.projects.map(p=>p.name)).toEqual(['BabyHub','Babysential','General','Unrelated'])
+    expect(result.projects.find(p=>p.id===5)).toMatchObject({key:null,noteCount:0,taskCounts:{total:1,open:1}})
+    const focused = readHQOperations(1,[note],db,5)
+    expect(focused.tasks).toHaveLength(1)
+    expect(focused.tasks[0]).toMatchObject({projectId:5,projectName:'Unrelated'})
+    expect(() => readHQOperations(1,[note],db,4)).toThrow('finnes ikke')
+  })
+})
+
+describe('dynamic project registry', () => {
+  it('reads membership roles per project without mixing other projects or workspaces', () => {
+    db.exec(`INSERT INTO project_agent_assignments VALUES
+      (1,'Ines','coordinator'),(2,'Ines','reviewer'),(4,'Ines','architecture'),
+      (5,'Ines',NULL),(5,'Reidar',' implementation '),(5,'Vera',' ');
+      INSERT INTO agents(workspace_id,name,role) VALUES(1,'Ines','agent')`)
+    const result = readHQOperations(1,[note],db)
+    expect(result.projects.find(p=>p.id===1)).toMatchObject({assignedAgents:['Ines'],assignedAgentRoles:{Ines:'coordinator'}})
+    expect(result.projects.find(p=>p.id===2)?.assignedAgentRoles).toEqual({Ines:'reviewer'})
+    expect(result.projects.find(p=>p.id===5)).toMatchObject({assignedAgents:['Ines','Reidar','Vera'],assignedAgentRoles:{Reidar:'implementation'}})
+    expect(result.projects.some(p=>p.id===4)).toBe(false)
+    expect(readHQOperations(2,[note],db).projects[0].assignedAgentRoles).toEqual({Ines:'architecture'})
+    expect(result.agents[0].role).toBe('agent')
+  })
+  it('retains an older critical task ahead of 200 newer medium-priority tasks', () => {
+    const insert = db.prepare("INSERT INTO tasks(workspace_id,title,status,priority,project_id,metadata,updated_at) VALUES(1,?,'inbox',?,5,'{}',?)")
+    insert.run('Critical work', 'critical', 1)
+    for (let i=0;i<200;i++) insert.run('Routine '+i, 'medium', 100+i)
+    const result = readHQOperations(1,[note],db,5)
+    expect(result.tasks).toHaveLength(200)
+    expect(result.tasks[0].title).toBe('Critical work')
+    expect(result.projects.find(p=>p.id===5)?.taskCounts?.total).toBe(201)
+  })
+  it('keeps legacy invalid deadlines from breaking every project snapshot', () => {
+    db.prepare('UPDATE projects SET deadline=? WHERE id=5').run(1e20)
+    const result = readHQOperations(1,[note],db)
+    expect(result.projects.find(p=>p.id===5)?.deadline).toBeNull()
+    expect(result.projects).toHaveLength(4)
+  })
+  it('counts the whole project even when the detail list is bounded and reads its team', () => {
+    const insert = db.prepare("INSERT INTO tasks(workspace_id,title,status,project_id,metadata,updated_at) VALUES(1,?,'inbox',5,'{}',1)")
+    for (let i=0;i<205;i++) insert.run('Work '+i)
+    db.exec("INSERT INTO project_agent_assignments(project_id,agent_name) VALUES(5,'Ines'); INSERT INTO projects(id,workspace_id,name,slug,status) VALUES(6,1,'Archived','archived','archived')")
+    const result = readHQOperations(1,[note],db,5)
+    expect(result.tasks).toHaveLength(200)
+    expect(result.projects.find(p=>p.id===5)).toMatchObject({taskCounts:{total:205,open:205},assignedAgents:['Ines'],key:null,noteCount:0})
+    expect(result.projects.some(p=>p.id===6)).toBe(false)
+  })
+  it('creates a source-backed task in a newly registered project without treating it as General', () => {
+    const sharedNote = {...note,projectKey:'shared' as const}
+    const request = {...input(),projectId:5,projectKey:'shared' as const}
+    const created = createHQTask(request,1,'operator',[sharedNote],db)
+    expect(created.task).toMatchObject({projectId:5,projectName:'Unrelated',ticketRef:'OTHER-001'})
+    expect(createHQTask(request,1,'operator',[sharedNote],db).created).toBe(false)
+    expect(() => createHQTask({...request,projectId:4,idempotencyKey:'different-1234567890'},1,'operator',[sharedNote],db)).toThrow('ikke koblet')
+    expect(() => createHQTask({...input(),projectId:5,idempotencyKey:'mismatch-1234567890'},1,'operator',[note],db)).toThrow('stemmer ikke')
+    expect(db.prepare('SELECT ticket_counter FROM projects WHERE id=3').get()).toEqual({ticket_counter:0})
   })
 })
 

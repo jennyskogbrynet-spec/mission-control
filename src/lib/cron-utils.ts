@@ -38,29 +38,60 @@ export function validateCronExpression(expr: string): string | null {
   const maxValues = [59, 23, 31, 12, 7]
   const minValues = [0, 0, 1, 1, 0]
 
+  const isUnsignedInteger = (value: string) => /^\d+$/.test(value)
+
   for (let i = 0; i < 5; i++) {
     const field = parts[i]
     if (field === '*') continue
 
-    // Step values: */N
-    if (field.startsWith('*/')) {
-      const step = Number(field.slice(2))
-      if (isNaN(step) || step < 1) return `Invalid step value in ${fieldNames[i]}: ${field}`
-      continue
-    }
+    const name = fieldNames[i]
+    const min = minValues[i]
+    const max = maxValues[i]
 
-    // Comma-separated values and ranges
+    // Comma-separated values, ranges, and steps (e.g. 5, 9-17, */2, 9-17/2)
     const segments = field.split(',')
     for (const segment of segments) {
-      // Range: N-M
-      const rangeParts = segment.split('-')
-      for (const part of rangeParts) {
-        const num = Number(part)
-        if (isNaN(num)) return `Invalid value in ${fieldNames[i]}: ${part}`
-        if (num < minValues[i] || num > maxValues[i]) {
-          return `${fieldNames[i]} value ${num} out of range (${minValues[i]}-${maxValues[i]})`
+      if (segment === '') return `Empty value in ${name}: ${field}`
+
+      // Split off an optional /step suffix (e.g. */2, 9-17/2).
+      const slashIndex = segment.indexOf('/')
+      const base = slashIndex === -1 ? segment : segment.slice(0, slashIndex)
+      const step = slashIndex === -1 ? null : segment.slice(slashIndex + 1)
+
+      if (step !== null) {
+        if (!isUnsignedInteger(step) || !Number.isSafeInteger(Number(step)) || Number(step) < 1) {
+          return `Invalid step value in ${name}: ${segment}`
         }
       }
+
+      if (base === '*') {
+        // '*' is only valid as a whole field (handled above) or as */N.
+        if (step === null) return `Invalid value in ${name}: ${segment}`
+        continue
+      }
+
+      let start: number
+      let end: number
+      if (base.includes('-')) {
+        // Range: N-M (exactly one dash, both endpoints unsigned integers)
+        const rangeParts = base.split('-')
+        if (
+          rangeParts.length !== 2 ||
+          !isUnsignedInteger(rangeParts[0]) ||
+          !isUnsignedInteger(rangeParts[1])
+        ) {
+          return `Invalid range in ${name}: ${segment}`
+        }
+        start = Number(rangeParts[0])
+        end = Number(rangeParts[1])
+      } else {
+        if (!isUnsignedInteger(base)) return `Invalid value in ${name}: ${segment}`
+        start = end = Number(base)
+      }
+
+      if (start < min || start > max) return `${name} value ${start} out of range (${min}-${max})`
+      if (end < min || end > max) return `${name} value ${end} out of range (${min}-${max})`
+      if (end < start) return `Invalid range in ${name}: ${segment} (start exceeds end)`
     }
   }
 

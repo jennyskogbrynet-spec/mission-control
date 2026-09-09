@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers } from '@/lib/db'
-import { runOpenClaw } from '@/lib/command'
+import { getAgentCommandSession, sendAgentCommand } from '@/lib/agent-delivery'
 import { requireRole } from '@/lib/auth'
 import { validateBody, createMessageSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
     const result = await validateBody(request, createMessageSchema)
     if ('error' in result) return result.error
     const { to, message } = result.data
+    if (message.length > 6000) return NextResponse.json({ error: 'Message must be at most 6000 characters' }, { status: 400 })
     const from = auth.user.display_name || auth.user.username || 'system'
 
     // Scan message for injection — this gets forwarded directly to an agent
@@ -48,24 +49,17 @@ export async function POST(request: NextRequest) {
     if (!agent) {
       return NextResponse.json({ error: 'Recipient agent not found' }, { status: 404 })
     }
-    if (!agent.session_key) {
+    const sessionKey = getAgentCommandSession(agent, workspaceId)
+    if (!sessionKey) {
       return NextResponse.json(
-        { error: 'Recipient agent has no session key configured' },
+        { error: 'Recipient has no OpenClaw identity or command session configured' },
         { status: 400 }
       )
     }
 
-    await runOpenClaw(
-      [
-        'gateway',
-        'sessions_send',
-        '--session',
-        agent.session_key,
-        '--message',
-        `Message from ${from}: ${message}`
-      ],
-      { timeoutMs: 10000 }
-    )
+    const idempotencyKey = request.headers.get('idempotency-key') || undefined
+    if (idempotencyKey && !/^[0-9a-f-]{36}$/i.test(idempotencyKey)) return NextResponse.json({ error: 'Invalid idempotency key' }, { status: 400 })
+    const delivery = await sendAgentCommand(sessionKey, `Message from ${from}: ${message}`, idempotencyKey)
 
     db_helpers.createNotification(
       to,
@@ -82,14 +76,14 @@ export async function POST(request: NextRequest) {
       'agent',
       agent.id,
       from,
-      `Sent message to ${to}`,
-      { to },
+      `Gateway accepted message to ${to}`,
+      { to, ...delivery },
       workspaceId
     )
 
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true, ...delivery })
   } catch (error) {
     logger.error({ err: error }, 'POST /api/agents/message error')
-    return NextResponse.json({ error: 'Failed to send message' }, { status: 500 })
+    return NextResponse.json({ error: 'Command delivery could not be confirmed. Check the session before retrying.', status: 'outcome_unknown' }, { status: 502 })
   }
 }

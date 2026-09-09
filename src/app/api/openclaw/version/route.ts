@@ -1,77 +1,31 @@
 import { NextResponse } from 'next/server'
+import { requireRole } from '@/lib/auth'
 import { runOpenClaw } from '@/lib/command'
+import { compareOpenClawVersions, getLatestOpenClawRelease, getOpenClawUpgradePolicy, parseOpenClawVersion } from '@/lib/openclaw-upgrade-policy'
 
-const GITHUB_RELEASES_URL =
-  'https://api.github.com/repos/openclaw/openclaw/releases/latest'
+const headers = { 'Cache-Control': 'private, no-store' }
 
-function compareSemver(a: string, b: string): number {
-  const pa = a.replace(/^v/, '').split('.').map(Number)
-  const pb = b.replace(/^v/, '').split('.').map(Number)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] ?? 0
-    const nb = pb[i] ?? 0
-    if (na > nb) return 1
-    if (na < nb) return -1
+export async function GET(request: Request) {
+  const auth = requireRole(request, 'viewer')
+  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local OpenClaw belongs to the primary workspace only' }, { status: 403 })
   }
-  return 0
-}
-
-const headers = { 'Cache-Control': 'public, max-age=3600' }
-
-export async function GET() {
   let installed: string | null = null
-
   try {
-    const result = await runOpenClaw(['--version'], { timeoutMs: 3000 })
-    const match = result.stdout.match(/(\d+\.\d+\.\d+)/)
-    if (match) installed = match[1]
+    installed = parseOpenClawVersion((await runOpenClaw(['--version'], { timeoutMs: 3000 })).stdout)
+    if (!installed) throw new Error('Installed version unavailable')
+    const release = await getLatestOpenClawRelease()
+    const policy = getOpenClawUpgradePolicy(installed, release.latest)
+    return NextResponse.json({
+      installed, ...release,
+      updateAvailable: compareOpenClawVersions(release.latest, installed) > 0,
+      updateBlocked: policy.updateBlocked,
+      updateBlockedReason: policy.updateBlockedReason,
+      updateCommand: policy.updateCommand,
+      canUpdate: auth.user.role === 'admin' && !policy.updateBlocked,
+    }, { headers })
   } catch {
-    // OpenClaw not installed or not reachable
-    return NextResponse.json(
-      { installed: null, latest: null, updateAvailable: false },
-      { headers }
-    )
-  }
-
-  if (!installed) {
-    return NextResponse.json(
-      { installed: null, latest: null, updateAvailable: false },
-      { headers }
-    )
-  }
-
-  try {
-    const res = await fetch(GITHUB_RELEASES_URL, {
-      headers: { Accept: 'application/vnd.github+json' },
-      next: { revalidate: 3600 },
-    })
-
-    if (!res.ok) {
-      return NextResponse.json(
-        { installed, latest: null, updateAvailable: false },
-        { headers }
-      )
-    }
-
-    const release = await res.json()
-    const latest = (release.tag_name ?? '').replace(/^v/, '')
-    const updateAvailable = compareSemver(latest, installed) > 0
-
-    return NextResponse.json(
-      {
-        installed,
-        latest,
-        updateAvailable,
-        releaseUrl: release.html_url ?? '',
-        releaseNotes: release.body ?? '',
-        updateCommand: 'openclaw update --channel stable',
-      },
-      { headers }
-    )
-  } catch {
-    return NextResponse.json(
-      { installed, latest: null, updateAvailable: false },
-      { headers }
-    )
+    return NextResponse.json({ installed, latest: null, updateAvailable: false, canUpdate: false, updateCommand: null }, { headers })
   }
 }

@@ -56,7 +56,10 @@ function parseToken(token: string, min: number, max: number): { any: boolean; va
 
     const single = Number(rangePart)
     if (!Number.isFinite(single)) continue
-    if (single >= min && single <= max) valueSet.add(single)
+    if (single >= min && single <= max) {
+      if (stepPart) { for (let i = single; i <= max; i += step) valueSet.add(i) }
+      else valueSet.add(single)
+    }
   }
 
   return { any: false, values: valueSet }
@@ -80,13 +83,13 @@ function parseCron(raw: string): ParsedCron | null {
     hour: parseField(parts[1], 0, 23),
     dayOfMonth: parseField(parts[2], 1, 31),
     month: parseField(parts[3], 1, 12),
-    dayOfWeek: parseField(parts[4], 0, 6),
+    dayOfWeek: parseField(parts[4], 0, 7),
   }
 }
 
-function matchesDay(parsed: ParsedCron, date: Date): boolean {
-  const dayOfMonthMatches = parsed.dayOfMonth.matches(date.getDate())
-  const dayOfWeekMatches = parsed.dayOfWeek.matches(date.getDay())
+function matchesDay(parsed: ParsedCron, day: number, weekday: number): boolean {
+  const dayOfMonthMatches = parsed.dayOfMonth.matches(day)
+  const dayOfWeekMatches = parsed.dayOfWeek.matches(weekday) || (weekday === 0 && parsed.dayOfWeek.matches(7))
 
   if (parsed.dayOfMonth.any && parsed.dayOfWeek.any) return true
   if (parsed.dayOfMonth.any) return dayOfWeekMatches
@@ -101,6 +104,8 @@ export function buildDayKey(date: Date): string {
   return `${year}-${month}-${day}`
 }
 
+const zonedMinutes = new Map<string, Date>()
+
 export function getCronOccurrences(
   schedule: string,
   rangeStartMs: number,
@@ -109,6 +114,13 @@ export function getCronOccurrences(
 ): CronOccurrence[] {
   if (!schedule || !Number.isFinite(rangeStartMs) || !Number.isFinite(rangeEndMs)) return []
   if (rangeEndMs <= rangeStartMs || max <= 0) return []
+
+  const timezone = schedule.match(/\(([^)]+)\)\s*$/)?.[1]
+  const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  let formatter: Intl.DateTimeFormat | undefined
+  try {
+    if (timezone && timezone !== localTimezone) formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' })
+  } catch { return [] }
 
   const parsed = parseCron(schedule)
   if (!parsed) return []
@@ -121,19 +133,59 @@ export function getCronOccurrences(
   }
 
   while (cursor.getTime() < rangeEndMs && occurrences.length < max) {
+    let wallClock = cursor
+    if (formatter) {
+      const key = `${timezone}:${cursor.getTime()}`
+      let cached = zonedMinutes.get(key)
+      if (!cached) {
+        const parts = Object.fromEntries(formatter.formatToParts(cursor).map(part => [part.type, part.value]))
+        cached = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute)))
+        if (zonedMinutes.size >= 100000) zonedMinutes.clear()
+        zonedMinutes.set(key, cached)
+      }
+      wallClock = cached
+    }
     if (
-      parsed.month.matches(cursor.getMonth() + 1) &&
-      matchesDay(parsed, cursor) &&
-      parsed.hour.matches(cursor.getHours()) &&
-      parsed.minute.matches(cursor.getMinutes())
+      parsed.month.matches((formatter ? wallClock.getUTCMonth() : wallClock.getMonth()) + 1) &&
+      matchesDay(parsed, formatter ? wallClock.getUTCDate() : wallClock.getDate(), formatter ? wallClock.getUTCDay() : wallClock.getDay()) &&
+      parsed.hour.matches(formatter ? wallClock.getUTCHours() : wallClock.getHours()) &&
+      parsed.minute.matches(formatter ? wallClock.getUTCMinutes() : wallClock.getMinutes())
     ) {
       occurrences.push({
         atMs: cursor.getTime(),
         dayKey: buildDayKey(cursor),
       })
     }
-    cursor.setMinutes(cursor.getMinutes() + 1, 0, 0)
+    cursor.setTime(cursor.getTime() + 60000)
   }
 
+  return occurrences
+}
+
+
+/** Enabled schedules only; intervals use the gateway anchor and one-shots use their instant. */
+export function getJobCalendarOccurrences(
+  job: { schedule: string; enabled: boolean; nextRun?: number; everyMs?: number; anchorMs?: number },
+  start: number, end: number, max = 1000,
+): CronOccurrence[] {
+  if (!job.enabled || !Number.isFinite(start) || !Number.isFinite(end) || end <= start || max <= 0) return []
+  if (job.schedule.startsWith('every ')) {
+    const interval = job.everyMs
+    const anchor = job.anchorMs ?? job.nextRun
+    if (interval && interval > 0 && Number.isFinite(interval) && anchor != null && Number.isFinite(anchor)) {
+      const rows: CronOccurrence[] = []
+      let atMs = anchor + Math.max(0, Math.ceil((start - anchor) / interval)) * interval
+      for (; atMs < end && rows.length < max; atMs += interval) rows.push({ atMs, dayKey: buildDayKey(new Date(atMs)) })
+      return rows
+    }
+  }
+  if (job.schedule.startsWith('at ')) {
+    const atMs = Date.parse(job.schedule.slice(3))
+    return atMs >= start && atMs < end ? [{ atMs, dayKey: buildDayKey(new Date(atMs)) }] : []
+  }
+  const occurrences = getCronOccurrences(job.schedule, start, end, max)
+  if (occurrences.length === 0 && job.nextRun != null && job.nextRun >= start && job.nextRun < end) {
+    occurrences.push({ atMs: job.nextRun, dayKey: buildDayKey(new Date(job.nextRun)) })
+  }
   return occurrences
 }

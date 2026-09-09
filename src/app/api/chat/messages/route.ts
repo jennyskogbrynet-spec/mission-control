@@ -1,3 +1,4 @@
+import { gatewayAccepted } from '@/lib/agent-delivery'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers, Message } from '@/lib/db'
 import { runOpenClaw } from '@/lib/command'
@@ -455,9 +456,11 @@ export async function POST(request: NextRequest) {
         if (!sessionKey) {
           const match = sessions.find(
             (s) =>
-              s.agent.toLowerCase() === String(to).toLowerCase() ||
-              s.agent.toLowerCase() === coordinatorResolution.deliveryName.toLowerCase() ||
-              s.agent.toLowerCase() === String(coordinatorResolution.openclawAgentId || '').toLowerCase()
+              (s.key === `agent:${s.agent}:main` || s.key === `agent:${s.agent}:mc`) && (
+                s.agent.toLowerCase() === String(to).toLowerCase() ||
+                s.agent.toLowerCase() === coordinatorResolution.deliveryName.toLowerCase() ||
+                s.agent.toLowerCase() === String(coordinatorResolution.openclawAgentId || '').toLowerCase()
+              )
           )
           sessionKey = match?.key || match?.sessionId || null
         }
@@ -501,8 +504,8 @@ export async function POST(request: NextRequest) {
                 },
                 12000,
               )
-              const status = String(acceptedPayload?.status || '').toLowerCase()
-              forwardInfo.delivered = status === 'started' || status === 'ok' || status === 'in_flight'
+              forwardInfo.delivered = gatewayAccepted(acceptedPayload)
+              if (!forwardInfo.delivered) forwardInfo.reason = 'gateway_not_acknowledged'
               forwardInfo.session = sessionKey
               if (typeof acceptedPayload?.runId === 'string' && acceptedPayload.runId) {
                 forwardInfo.runId = acceptedPayload.runId
@@ -529,7 +532,8 @@ export async function POST(request: NextRequest) {
                 { timeoutMs: 12000 }
               )
               const acceptedPayload = parseGatewayJson(invokeResult.stdout)
-              forwardInfo.delivered = true
+              forwardInfo.delivered = gatewayAccepted(acceptedPayload)
+              if (!forwardInfo.delivered) forwardInfo.reason = 'gateway_not_acknowledged'
               forwardInfo.session = openclawAgentId || undefined
               if (typeof acceptedPayload?.runId === 'string' && acceptedPayload.runId) {
                 forwardInfo.runId = acceptedPayload.runId
@@ -583,7 +587,7 @@ export async function POST(request: NextRequest) {
                 conversation_id,
                 COORDINATOR_AGENT,
                 from,
-                'Received. I am coordinating downstream agents now.',
+                'The runtime accepted your message. Waiting for its response.',
                 'status',
                 { status: 'accepted', runId: forwardInfo.runId || null }
               )

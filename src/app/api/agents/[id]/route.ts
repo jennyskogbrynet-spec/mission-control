@@ -1,3 +1,4 @@
+import { getAgentCommandSession } from '@/lib/agent-delivery'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers, logAuditEvent } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
@@ -34,6 +35,7 @@ export async function GET(
 
     const parsed = {
       ...(agent as any),
+      command_session_key: getAgentCommandSession(agent as any, workspaceId),
       config: enrichAgentConfigFromWorkspace((agent as any).config ? JSON.parse((agent as any).config) : {}),
     }
 

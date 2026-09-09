@@ -1,275 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { readFile, writeFile, access } from 'fs/promises'
-import { dirname } from 'path'
-import { config, ensureDirExists } from '@/lib/config'
+import { config } from '@/lib/config'
 import { requireRole } from '@/lib/auth'
-import { getAllGatewaySessions } from '@/lib/sessions'
 import { logger } from '@/lib/logger'
 import { getDatabase } from '@/lib/db'
-import { calculateTokenCost } from '@/lib/token-pricing'
-import { getProviderSubscriptionFlags } from '@/lib/provider-subscriptions'
+import { loadTokenData, priceUsage } from '@/lib/token-data'
+import { calculateStats, extractAgentName, buildAgentCostBreakdown, type TokenUsageRecord, type TokenStats } from '@/lib/token-ledger'
+import { generateCsvContent } from '@/lib/token-utils'
+import { appendTokenRecord } from '@/lib/token-storage'
 import { buildTaskCostReport, type TaskCostMetadata } from '@/lib/task-costs'
 
 const DATA_PATH = config.tokensPath
-
-interface TokenUsageRecord {
-  id: string
-  model: string
-  sessionId: string
-  agentName: string
-  timestamp: number
-  inputTokens: number
-  outputTokens: number
-  totalTokens: number
-  cost: number
-  operation: string
-  taskId?: number | null
-  workspaceId?: number
-  duration?: number
-}
-
-interface TokenStats {
-  totalTokens: number
-  totalCost: number
-  requestCount: number
-  avgTokensPerRequest: number
-  avgCostPerRequest: number
-}
-
-interface ExportData {
-  usage: TokenUsageRecord[]
-  summary: TokenStats
-  models: Record<string, TokenStats>
-  sessions: Record<string, TokenStats>
-}
-
+interface ExportData { coverage?: unknown; usage: TokenUsageRecord[]; summary: TokenStats; models: Record<string, TokenStats>; sessions: Record<string, TokenStats> }
 interface TaskMetadataRow extends TaskCostMetadata {}
-
-function extractAgentName(sessionId: string): string {
-  const trimmed = sessionId.trim()
-  if (!trimmed) return 'unknown'
-  const [agent] = trimmed.split(':')
-  return agent?.trim() || 'unknown'
-}
-
-interface DbTokenUsageRow {
-  id: number
-  model: string
-  session_id: string
-  input_tokens: number
-  output_tokens: number
-  task_id?: number | null
-  workspace_id?: number
-  created_at: number
-}
-
-function loadTokenDataFromDb(workspaceId: number, providerSubscriptions: Record<string, boolean>): TokenUsageRecord[] {
-  try {
-    const db = getDatabase()
-    const rows = db.prepare(`
-      SELECT id, model, session_id, input_tokens, output_tokens, task_id, workspace_id, created_at
-      FROM token_usage
-      WHERE workspace_id = ?
-      ORDER BY created_at DESC, id DESC
-      LIMIT 10000
-    `).all(workspaceId) as DbTokenUsageRow[]
-
-    return rows.map((row) => {
-      const totalTokens = row.input_tokens + row.output_tokens
-      return {
-        id: `db-${row.id}`,
-        model: row.model,
-        sessionId: row.session_id,
-        agentName: extractAgentName(row.session_id),
-        timestamp: row.created_at * 1000,
-        inputTokens: row.input_tokens,
-        outputTokens: row.output_tokens,
-        totalTokens,
-        cost: calculateTokenCost(row.model, row.input_tokens, row.output_tokens, { providerSubscriptions }),
-        operation: 'heartbeat',
-        taskId: row.task_id ?? null,
-        workspaceId: row.workspace_id ?? workspaceId,
-      }
-    })
-  } catch (error) {
-    logger.warn({ err: error }, 'Failed to load token usage from database')
-    return []
-  }
-}
-
-function normalizeTokenRecord(
-  record: Partial<TokenUsageRecord>,
-  providerSubscriptions: Record<string, boolean>,
-): TokenUsageRecord | null {
-  if (!record.model || !record.sessionId) return null
-  const inputTokens = Number(record.inputTokens ?? 0)
-  const outputTokens = Number(record.outputTokens ?? 0)
-  const totalTokens = Number(record.totalTokens ?? inputTokens + outputTokens)
-  const model = String(record.model)
-  return {
-    id: String(record.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`),
-    model,
-    sessionId: String(record.sessionId),
-    agentName: String(record.agentName ?? extractAgentName(String(record.sessionId))),
-    timestamp: Number(record.timestamp ?? Date.now()),
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    cost: Number(record.cost ?? calculateTokenCost(model, inputTokens, outputTokens, { providerSubscriptions })),
-    operation: String(record.operation ?? 'chat_completion'),
-    taskId: record.taskId != null && Number.isFinite(Number(record.taskId)) ? Number(record.taskId) : null,
-    workspaceId: record.workspaceId != null && Number.isFinite(Number(record.workspaceId)) ? Number(record.workspaceId) : 1,
-    duration: record.duration,
-  }
-}
-
-function dedupeTokenRecords(records: TokenUsageRecord[]): TokenUsageRecord[] {
-  const seen = new Set<string>()
-  const deduped: TokenUsageRecord[] = []
-
-  for (const record of records) {
-    const key = [
-      record.sessionId,
-      record.model,
-      record.timestamp,
-      record.inputTokens,
-      record.outputTokens,
-      record.totalTokens,
-      record.operation,
-      record.taskId ?? '',
-      record.workspaceId ?? 1,
-      record.duration ?? '',
-    ].join('|')
-    if (seen.has(key)) continue
-    seen.add(key)
-    deduped.push(record)
-  }
-
-  return deduped
-}
-
-async function loadTokenDataFromFile(workspaceId: number, providerSubscriptions: Record<string, boolean>): Promise<TokenUsageRecord[]> {
-  try {
-    ensureDirExists(dirname(DATA_PATH))
-    await access(DATA_PATH)
-    const data = await readFile(DATA_PATH, 'utf-8')
-    const parsed = JSON.parse(data)
-    if (!Array.isArray(parsed)) return []
-
-    return parsed
-      .map((record: Partial<TokenUsageRecord>) => normalizeTokenRecord(record, providerSubscriptions))
-      .filter((record): record is TokenUsageRecord => record !== null)
-      .filter((record) => {
-        if (record.workspaceId === workspaceId) return true
-        // Backward compatibility for pre-workspace records
-        return workspaceId === 1 && (!record.workspaceId || record.workspaceId === 1)
-      })
-  } catch {
-    return []
-  }
-}
-
-/**
- * Load token data from all sources: DB, file, and gateway session stores.
- * All sources are merged and deduplicated so session-derived data is always included.
- */
-async function loadTokenData(workspaceId: number): Promise<TokenUsageRecord[]> {
-  const providerSubscriptions = getProviderSubscriptionFlags()
-  const dbRecords = loadTokenDataFromDb(workspaceId, providerSubscriptions)
-  const fileRecords = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
-  const sessionRecords = deriveFromSessions(workspaceId, providerSubscriptions)
-  return dedupeTokenRecords([...dbRecords, ...fileRecords, ...sessionRecords])
-    .sort((a, b) => b.timestamp - a.timestamp)
-}
-
-/**
- * Derive token usage records from OpenClaw session stores.
- * Each session has totalTokens, inputTokens, outputTokens, model, etc.
- */
-function deriveFromSessions(workspaceId: number, providerSubscriptions: Record<string, boolean>): TokenUsageRecord[] {
-  const sessions = getAllGatewaySessions(Infinity) // Get ALL sessions regardless of age
-  const records: TokenUsageRecord[] = []
-
-  for (const session of sessions) {
-    const inputTokens = session.inputTokens || 0
-    const outputTokens = session.outputTokens || 0
-    const totalTokens = inputTokens + outputTokens
-    if (totalTokens <= 0 && !session.model) continue // Skip empty sessions
-    const cost = calculateTokenCost(session.model || '', inputTokens, outputTokens, { providerSubscriptions })
-
-    records.push({
-      id: `session-${session.agent}-${session.key}`,
-      model: session.model || 'unknown',
-      sessionId: `${session.agent}:${session.chatType}`,
-      agentName: session.agent || 'unknown',
-      timestamp: session.updatedAt,
-      inputTokens,
-      outputTokens,
-      totalTokens,
-      cost,
-      operation: session.chatType || 'chat',
-      taskId: null,
-      workspaceId,
-    })
-  }
-
-  records.sort((a, b) => b.timestamp - a.timestamp)
-  return records
-}
-
-async function saveTokenData(data: TokenUsageRecord[]): Promise<void> {
-  ensureDirExists(dirname(DATA_PATH))
-  await writeFile(DATA_PATH, JSON.stringify(data, null, 2))
-}
-
-function calculateStats(records: TokenUsageRecord[]): TokenStats {
-  if (records.length === 0) {
-    return {
-      totalTokens: 0,
-      totalCost: 0,
-      requestCount: 0,
-      avgTokensPerRequest: 0,
-      avgCostPerRequest: 0,
-    }
-  }
-
-  const totalTokens = records.reduce((sum, r) => sum + r.totalTokens, 0)
-  const totalCost = records.reduce((sum, r) => sum + r.cost, 0)
-  const requestCount = records.length
-
-  return {
-    totalTokens,
-    totalCost,
-    requestCount,
-    avgTokensPerRequest: Math.round(totalTokens / requestCount),
-    avgCostPerRequest: totalCost / requestCount,
-  }
-}
-
-function filterByTimeframe(records: TokenUsageRecord[], timeframe: string): TokenUsageRecord[] {
-  const now = Date.now()
-  let cutoffTime: number
-
-  switch (timeframe) {
-    case 'hour':
-      cutoffTime = now - 60 * 60 * 1000
-      break
-    case 'day':
-      cutoffTime = now - 24 * 60 * 60 * 1000
-      break
-    case 'week':
-      cutoffTime = now - 7 * 24 * 60 * 60 * 1000
-      break
-    case 'month':
-      cutoffTime = now - 30 * 24 * 60 * 60 * 1000
-      break
-    case 'all':
-    default:
-      return records
-  }
-
-  return records.filter(record => record.timestamp >= cutoffTime)
-}
 
 function loadTaskMetadataById(workspaceId: number, taskIds: number[]): Record<number, TaskCostMetadata> {
   if (taskIds.length === 0) return {}
@@ -312,15 +54,27 @@ export async function GET(request: NextRequest) {
     const format = searchParams.get('format') || 'json'
 
     const workspaceId = auth.user.workspace_id ?? 1
-    const tokenData = await loadTokenData(workspaceId)
-    const filteredData = filterByTimeframe(tokenData, timeframe)
+    const ledger = await loadTokenData(workspaceId, timeframe)
+    const filteredData = ledger.records
 
     if (action === 'list') {
       return NextResponse.json({
-        usage: filteredData.slice(0, 100),
+        usage: filteredData.slice(0, 100), coverage: ledger.coverage, asOf: ledger.asOf,
         total: filteredData.length,
         timeframe,
       })
+    }
+
+    if (action === 'session-costs') {
+      const groups = new Map<string, TokenUsageRecord[]>()
+      for (const record of filteredData) groups.set(record.sessionId, [...(groups.get(record.sessionId) || []), record])
+      return NextResponse.json({ sessions: [...groups.entries()].map(([sessionId, entries]) => ({
+        sessionId, model: [...new Set(entries.map(entry => entry.model))].join(', '),
+        inputTokens: entries.reduce((sum, entry) => sum + entry.inputTokens, 0), outputTokens: entries.reduce((sum, entry) => sum + entry.outputTokens, 0),
+        totalTokens: calculateStats(entries).totalTokens, totalCost: calculateStats(entries).totalCost, requestCount: entries.length,
+        pricedTokens: calculateStats(entries).pricedTokens, pricedRecordCount: calculateStats(entries).pricedRecordCount,
+        firstSeen: new Date(Math.min(...entries.map(entry => entry.timestamp))).toISOString(), lastSeen: new Date(Math.max(...entries.map(entry => entry.timestamp))).toISOString(),
+      })), coverage: ledger.coverage, asOf: ledger.asOf, timeframe })
     }
 
     if (action === 'stats') {
@@ -330,9 +84,9 @@ export async function GET(request: NextRequest) {
         if (!acc[record.model]) acc[record.model] = []
         acc[record.model].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
-      const modelStats: Record<string, TokenStats> = {}
+      const modelStats: Record<string, TokenStats> = Object.create(null)
       for (const [model, records] of Object.entries(modelGroups)) {
         modelStats[model] = calculateStats(records)
       }
@@ -341,9 +95,9 @@ export async function GET(request: NextRequest) {
         if (!acc[record.sessionId]) acc[record.sessionId] = []
         acc[record.sessionId].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
-      const sessionStats: Record<string, TokenStats> = {}
+      const sessionStats: Record<string, TokenStats> = Object.create(null)
       for (const [sessionId, records] of Object.entries(sessionGroups)) {
         sessionStats[sessionId] = calculateStats(records)
       }
@@ -354,9 +108,9 @@ export async function GET(request: NextRequest) {
         if (!acc[agent]) acc[agent] = []
         acc[agent].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
-      const agentStats: Record<string, TokenStats> = {}
+      const agentStats: Record<string, TokenStats> = Object.create(null)
       for (const [agent, records] of Object.entries(agentGroups)) {
         agentStats[agent] = calculateStats(records)
       }
@@ -366,6 +120,8 @@ export async function GET(request: NextRequest) {
         models: modelStats,
         sessions: sessionStats,
         agents: agentStats,
+        agentBreakdown: buildAgentCostBreakdown(filteredData, ({ hour: 1 / 24, day: 1, week: 7, month: 30 } as Record<string, number>)[timeframe] || 30),
+        coverage: ledger.coverage, asOf: ledger.asOf,
         timeframe,
         recordCount: filteredData.length,
       })
@@ -377,14 +133,14 @@ export async function GET(request: NextRequest) {
         if (!acc[agent]) acc[agent] = []
         acc[agent].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
       const agents: Record<string, {
         stats: TokenStats
         models: Record<string, TokenStats>
         sessions: string[]
         timeline: Array<{ date: string; cost: number; tokens: number }>
-      }> = {}
+      }> = Object.create(null)
 
       for (const [agent, records] of Object.entries(agentGroups)) {
         const stats = calculateStats(records)
@@ -394,8 +150,8 @@ export async function GET(request: NextRequest) {
           if (!acc[r.model]) acc[r.model] = []
           acc[r.model].push(r)
           return acc
-        }, {} as Record<string, TokenUsageRecord[]>)
-        const models: Record<string, TokenStats> = {}
+        }, Object.create(null) as Record<string, TokenUsageRecord[]>)
+        const models: Record<string, TokenStats> = Object.create(null)
         for (const [model, mrs] of Object.entries(modelGroups)) {
           models[model] = calculateStats(mrs)
         }
@@ -441,29 +197,30 @@ export async function GET(request: NextRequest) {
           timestamp: record.timestamp,
           totalTokens: record.totalTokens,
           cost: record.cost,
+          costSource: record.costSource,
           taskId: record.taskId ?? null,
         })),
         taskMetadataById
       )
 
       return NextResponse.json({
-        ...report,
+        ...report, coverage: ledger.coverage,
         timeframe,
         recordCount: filteredData.length,
-        attributedRecordCount: filteredData.filter((record) => Number.isFinite(record.taskId)).length,
+        attributedRecordCount: report.summary.requestCount,
       })
     }
 
     if (action === 'export') {
       const overallStats = calculateStats(filteredData)
-      const modelStats: Record<string, TokenStats> = {}
-      const sessionStats: Record<string, TokenStats> = {}
+      const modelStats: Record<string, TokenStats> = Object.create(null)
+      const sessionStats: Record<string, TokenStats> = Object.create(null)
 
       const modelGroups = filteredData.reduce((acc, record) => {
         if (!acc[record.model]) acc[record.model] = []
         acc[record.model].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
       for (const [model, records] of Object.entries(modelGroups)) {
         modelStats[model] = calculateStats(records)
@@ -473,13 +230,14 @@ export async function GET(request: NextRequest) {
         if (!acc[record.sessionId]) acc[record.sessionId] = []
         acc[record.sessionId].push(record)
         return acc
-      }, {} as Record<string, TokenUsageRecord[]>)
+      }, Object.create(null) as Record<string, TokenUsageRecord[]>)
 
       for (const [sessionId, records] of Object.entries(sessionGroups)) {
         sessionStats[sessionId] = calculateStats(records)
       }
 
       const exportData: ExportData = {
+        coverage: ledger.coverage,
         usage: filteredData,
         summary: overallStats,
         models: modelStats,
@@ -487,25 +245,12 @@ export async function GET(request: NextRequest) {
       }
 
       if (format === 'csv') {
-        const headers = ['timestamp', 'agentName', 'model', 'sessionId', 'operation', 'inputTokens', 'outputTokens', 'totalTokens', 'cost', 'duration']
-        const csvRows = [headers.join(',')]
+        const headers = ['timestamp', 'agentName', 'model', 'sessionId', 'operation', 'inputTokens', 'outputTokens', 'totalTokens', 'cost', 'costSource', 'source', 'taskId', 'duration']
+        const csv = generateCsvContent(filteredData.map(record => ({ ...record,
+          timestamp: new Date(record.timestamp).toISOString(), cost: record.costSource === 'unknown' ? '' : record.cost,
+        })), headers)
 
-        filteredData.forEach(record => {
-          csvRows.push([
-            new Date(record.timestamp).toISOString(),
-            record.agentName,
-            record.model,
-            record.sessionId,
-            record.operation,
-            record.inputTokens,
-            record.outputTokens,
-            record.totalTokens,
-            record.cost.toFixed(4),
-            record.duration || 0,
-          ].join(','))
-        })
-
-        return new NextResponse(csvRows.join('\n'), {
+        return new NextResponse(csv, {
           headers: {
             'Content-Type': 'text/csv',
             'Content-Disposition': `attachment; filename=token-usage-${timeframe}-${new Date().toISOString().split('T')[0]}.csv`,
@@ -522,9 +267,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'trends') {
-      const now = Date.now()
-      const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000
-      const recentData = filteredData.filter(r => r.timestamp >= twentyFourHoursAgo)
+      const recentData = filteredData
 
       const hourlyTrends: Record<string, { tokens: number; cost: number; requests: number }> = {}
 
@@ -561,13 +304,12 @@ export async function POST(request: NextRequest) {
     const workspaceId = auth.user.workspace_id ?? 1
     const { model, sessionId, inputTokens, outputTokens, operation = 'chat_completion', duration, taskId } = body
 
-    if (!model || !sessionId || typeof inputTokens !== 'number' || typeof outputTokens !== 'number') {
+    if (typeof model !== 'string' || !model.trim() || typeof sessionId !== 'string' || !sessionId.trim() || !Number.isSafeInteger(inputTokens) || inputTokens < 0 || !Number.isSafeInteger(outputTokens) || outputTokens < 0) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
     }
 
     const totalTokens = inputTokens + outputTokens
-    const providerSubscriptions = getProviderSubscriptionFlags()
-    const cost = calculateTokenCost(model, inputTokens, outputTokens, { providerSubscriptions })
+    const price = priceUsage(model, inputTokens, outputTokens)
     const parsedTaskId =
       taskId != null && Number.isFinite(Number(taskId)) && Number(taskId) > 0
         ? Number(taskId)
@@ -591,22 +333,14 @@ export async function POST(request: NextRequest) {
       inputTokens,
       outputTokens,
       totalTokens,
-      cost,
+      ...price, source: 'manual',
       operation,
       taskId: validatedTaskId,
       workspaceId,
       duration,
     }
 
-    // Persist only manually posted usage records in the JSON file.
-    const existingData = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
-    existingData.unshift(record)
-
-    if (existingData.length > 10000) {
-      existingData.splice(10000)
-    }
-
-    await saveTokenData(existingData)
+    await appendTokenRecord(DATA_PATH, { ...record }, workspaceId)
 
     return NextResponse.json({ success: true, record })
   } catch (error) {

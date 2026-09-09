@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { existsSync } from 'node:fs'
 import { APP_VERSION } from '@/lib/version'
+import { getManagedReleasePolicy } from '@/lib/managed-release'
 
 const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/builderz-labs/mission-control/releases/latest'
@@ -19,16 +20,19 @@ function compareSemver(a: string, b: string): number {
 }
 
 export async function GET() {
+  const policy = getManagedReleasePolicy()
+  const headers = { 'Cache-Control': 'private, no-store' }
   try {
     const res = await fetch(GITHUB_RELEASES_URL, {
       headers: { Accept: 'application/vnd.github+json' },
       next: { revalidate: 3600 }, // ISR cache for 1 hour
+      signal: AbortSignal.timeout(10_000),
     })
 
     if (!res.ok) {
       return NextResponse.json(
-        { updateAvailable: false, currentVersion: APP_VERSION },
-        { headers: { 'Cache-Control': 'public, max-age=3600' } }
+        { updateAvailable: false, currentVersion: APP_VERSION, ...policy },
+        { headers }
       )
     }
 
@@ -46,14 +50,15 @@ export async function GET() {
         releaseUrl: release.html_url ?? '',
         releaseNotes: release.body ?? '',
         deploymentMode,
+        ...policy,
       },
-      { headers: { 'Cache-Control': 'public, max-age=3600' } }
+      { headers }
     )
   } catch {
     // Network error — fail gracefully
     return NextResponse.json(
-      { updateAvailable: false, currentVersion: APP_VERSION },
-      { headers: { 'Cache-Control': 'public, max-age=600' } }
+      { updateAvailable: false, currentVersion: APP_VERSION, ...policy },
+      { headers }
     )
   }
 }

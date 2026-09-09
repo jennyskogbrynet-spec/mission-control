@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { syncAgentsFromConfig, previewSyncDiff } from '@/lib/agent-sync'
 import { syncLocalAgents } from '@/lib/local-agent-sync'
+import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 
 /**
@@ -12,14 +13,20 @@ import { logger } from '@/lib/logger'
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local agent synchronization belongs to the primary workspace only' }, { status: 403 })
+  }
+
+  const limited = mutationLimiter(request)
+  if (limited) return limited
 
   const { searchParams } = new URL(request.url)
   const source = searchParams.get('source')
 
   try {
     if (source === 'local') {
-      const result = await syncLocalAgents()
-      return NextResponse.json(result)
+      const result = await syncLocalAgents(auth.user.username)
+      return NextResponse.json(result, { status: result.ok ? 200 : 500 })
     }
 
     const result = await syncAgentsFromConfig(auth.user.username)
@@ -42,6 +49,9 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local agent synchronization belongs to the primary workspace only' }, { status: 403 })
+  }
 
   try {
     const diff = await previewSyncDiff()

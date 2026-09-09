@@ -20,6 +20,15 @@ function mkSession(agent: string, key: string): GatewaySession {
 }
 
 describe('resolveCoordinatorDeliveryTarget', () => {
+  it('does not route a new conversation into a recent cron or subagent run', () => {
+    const directAgent = { name: 'dev', config: JSON.stringify({ openclawId: 'dev' }) }
+    const resolved = resolveCoordinatorDeliveryTarget({
+      to: 'dev', coordinatorAgent: 'Coordinator', directAgent, allAgents: [],
+      sessions: [mkSession('dev', 'agent:dev:cron:busy'), mkSession('dev', 'agent:dev:subagent:busy')],
+    })
+    expect(resolved.sessionKey).toBeNull()
+    expect(resolved.openclawAgentId).toBe('dev')
+  })
   it('returns direct resolution when target agent exists', () => {
     const directAgent: CoordinatorAgentRecord = {
       name: 'dev',

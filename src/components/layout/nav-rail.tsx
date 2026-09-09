@@ -44,6 +44,7 @@ const navGroups: NavGroup[] = [
     items: [
       { id: 'activity', label: 'Activity', icon: <ActivityIcon />, priority: true, essential: true },
       { id: 'logs', label: 'Logs', icon: <LogsIcon />, priority: false, essential: true },
+      { id: 'compute', label: 'Kapasitet', icon: <CapacityIcon />, priority: false, essential: true },
       { id: 'cost-tracker', label: 'Cost Tracker', icon: <TokensIcon />, priority: false },
       { id: 'nodes', label: 'Nodes', icon: <NodesIcon />, priority: false },
       { id: 'exec-approvals', label: 'Approvals', icon: <ApprovalsIcon />, priority: false },
@@ -1523,4 +1524,9 @@ function MonitorIcon() {
       <path d="M5 14h6" />
     </svg>
   )
+}
+
+
+function CapacityIcon() {
+  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 18a9 9 0 1 1 16 0" /><path d="m12 13 4-5" /><circle cx="12" cy="13" r="1.5" /><path d="M5 19h14" /></svg>
 }

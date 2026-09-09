@@ -4,10 +4,15 @@ import { API_KEY_HEADER } from './helpers'
 test.describe('Cron Operations API', () => {
   // ── GET /api/cron ─────────────────────────────
 
-  test('GET /api/cron?action=list returns job list or empty array', async ({ request }) => {
+  test('GET /api/cron?action=list returns gateway jobs or an explicit unavailable error', async ({ request }) => {
     const res = await request.get('/api/cron?action=list', { headers: API_KEY_HEADER })
-    expect(res.status()).toBe(200)
+    expect([200, 503]).toContain(res.status())
     const body = await res.json()
+    if (res.status() === 503) {
+      expect(body.error).toContain('scheduler unavailable')
+      expect(body).not.toHaveProperty('jobs')
+      return
+    }
     expect(body).toHaveProperty('jobs')
     expect(Array.isArray(body.jobs)).toBe(true)
   })
@@ -30,8 +35,13 @@ test.describe('Cron Operations API', () => {
     const res = await request.get('/api/cron?action=history&jobId=nonexistent-job', {
       headers: API_KEY_HEADER,
     })
-    expect(res.status()).toBe(200)
+    expect([200, 503]).toContain(res.status())
     const body = await res.json()
+    if (res.status() === 503) {
+      expect(body.error).toContain('scheduler unavailable')
+      expect(body).not.toHaveProperty('entries')
+      return
+    }
     expect(body).toHaveProperty('entries')
     expect(Array.isArray(body.entries)).toBe(true)
     expect(body).toHaveProperty('total')

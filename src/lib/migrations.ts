@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
+import { migrateComputeLedger } from './compute-migration'
 
 export type Migration = {
   id: string
@@ -1451,6 +1452,7 @@ const migrations: Migration[] = [
       )
     },
   },
+  { id: '052_compute_capacity_ledger', up: migrateComputeLedger },
 ]
 
 export function runMigrations(db: Database.Database) {

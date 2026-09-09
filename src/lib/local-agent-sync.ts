@@ -222,7 +222,7 @@ function scanLocalAgents(): DiskAgent[] {
 // Sync engine
 // ---------------------------------------------------------------------------
 
-export async function syncLocalAgents(): Promise<{ ok: boolean; message: string }> {
+export async function syncLocalAgents(actor = 'scheduler'): Promise<{ ok: boolean; message: string }> {
   try {
     const db = getDatabase()
     const diskAgents = scanLocalAgents()
@@ -235,7 +235,7 @@ export async function syncLocalAgents(): Promise<{ ok: boolean; message: string 
 
     // Fetch DB agents with source='local'
     const dbRows = db.prepare(
-      `SELECT id, name, role, soul_content, status, source, content_hash, workspace_path, config FROM agents WHERE source = 'local'`
+      `SELECT id, name, role, soul_content, status, source, content_hash, workspace_path, config FROM agents WHERE source = 'local' AND workspace_id = 1`
     ).all() as AgentRow[]
 
     const dbMap = new Map<string, AgentRow>()
@@ -248,15 +248,15 @@ export async function syncLocalAgents(): Promise<{ ok: boolean; message: string 
     let removed = 0
 
     const insertStmt = db.prepare(`
-      INSERT INTO agents (name, role, soul_content, status, source, content_hash, workspace_path, config, created_at, updated_at)
-      VALUES (?, ?, ?, 'offline', 'local', ?, ?, ?, ?, ?)
+      INSERT INTO agents (name, role, soul_content, status, source, content_hash, workspace_path, config, created_at, updated_at, workspace_id)
+      VALUES (?, ?, ?, 'offline', 'local', ?, ?, ?, ?, ?, 1)
     `)
     const updateStmt = db.prepare(`
       UPDATE agents SET role = ?, soul_content = ?, content_hash = ?, workspace_path = ?, config = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND workspace_id = 1
     `)
     const markRemovedStmt = db.prepare(`
-      UPDATE agents SET status = 'offline', updated_at = ? WHERE id = ?
+      UPDATE agents SET status = 'offline', updated_at = ? WHERE id = ? AND workspace_id = 1
     `)
 
     db.transaction(() => {
@@ -288,7 +288,7 @@ export async function syncLocalAgents(): Promise<{ ok: boolean; message: string 
       logger.info(msg)
       logAuditEvent({
         action: 'local_agent_sync',
-        actor: 'scheduler',
+        actor,
         detail: { created, updated, removed, total: diskAgents.length },
       })
     }
@@ -316,7 +316,7 @@ export function writeLocalAgentSoul(agentDir: string, soulContent: string): void
   try {
     const db = getDatabase()
     const hash = sha256(soulContent)
-    db.prepare(`UPDATE agents SET content_hash = ?, updated_at = ? WHERE workspace_path = ? AND source = 'local'`)
+    db.prepare(`UPDATE agents SET content_hash = ?, updated_at = ? WHERE workspace_path = ? AND source = 'local' AND workspace_id = 1`)
       .run(hash, Math.floor(Date.now() / 1000), agentDir)
   } catch { /* best-effort */ }
 }

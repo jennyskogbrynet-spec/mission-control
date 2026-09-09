@@ -10,6 +10,7 @@ import { HeadquartersPanel } from '@/components/headquarters/headquarters-panel'
 import { LogViewerPanel } from '@/components/panels/log-viewer-panel'
 import { CronManagementPanel } from '@/components/panels/cron-management-panel'
 import { MemoryBrowserPanel } from '@/components/panels/memory-browser-panel'
+import { ComputeDashboardPanel } from '@/components/panels/compute-dashboard-panel'
 import { CostTrackerPanel } from '@/components/panels/cost-tracker-panel'
 import { TaskBoardPanel } from '@/components/panels/task-board-panel'
 import { ActivityFeedPanel } from '@/components/panels/activity-feed-panel'
@@ -237,8 +238,10 @@ export default function Home() {
       .then(data => { if (data?.user) setCurrentUser(data.user); markStep('auth') })
       .catch(() => { markStep('auth') })
 
-    // Check for available updates
-    fetch('/api/releases/check')
+    // Update permissions must come from fresh server policy, never an older cached response.
+    setUpdateAvailable(null)
+    setOpenclawUpdate(null)
+    fetch('/api/releases/check', { cache: 'no-store' })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data?.updateAvailable) {
@@ -246,13 +249,17 @@ export default function Home() {
             latestVersion: data.latestVersion,
             releaseUrl: data.releaseUrl,
             releaseNotes: data.releaseNotes,
+            managedRelease: data.managedRelease,
+            managedUpdateReason: data.managedUpdateReason,
           })
+        } else {
+          setUpdateAvailable(null)
         }
       })
       .catch(() => {})
 
     // Check for OpenClaw updates
-    fetch('/api/openclaw/version')
+    fetch('/api/openclaw/version', { cache: 'no-store' })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data?.updateAvailable) {
@@ -262,6 +269,9 @@ export default function Home() {
             releaseUrl: data.releaseUrl,
             releaseNotes: data.releaseNotes,
             updateCommand: data.updateCommand,
+            updateBlocked: data.updateBlocked,
+            updateBlockedReason: data.updateBlockedReason,
+            canUpdate: data.canUpdate,
           })
         } else {
           setOpenclawUpdate(null)
@@ -558,6 +568,8 @@ function ContentRouter({ tab }: { tab: string }) {
       return <CronManagementPanel />
     case 'memory':
       return <MemoryBrowserPanel />
+    case 'compute':
+      return <ComputeDashboardPanel />
     case 'cost-tracker':
     case 'tokens':
     case 'agent-costs':

@@ -51,7 +51,8 @@ function findSessionForAgent(
   const openclawId = normalizeOpenClawId(getConfigOpenClawId(agent) || agent.name)
   return sessions.find((session) => {
     const sessionAgent = normalizeName(session.agent)
-    return sessionAgent === name || sessionAgent === openclawId
+    const isConversation = session.key === `agent:${session.agent}:main` || session.key === `agent:${session.agent}:mc`
+    return isConversation && (sessionAgent === name || sessionAgent === openclawId)
   })
 }
 

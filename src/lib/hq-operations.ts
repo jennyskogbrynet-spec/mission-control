@@ -5,12 +5,6 @@ import { normalizeTaskMetadata } from '@/lib/mc-agentic-os'
 import type { HQProject, HQProjectKey, HQTask, HQNote, HQEvidence, HQAgent, HQActivity, HQTaskCreateInput } from '@/lib/hq-types'
 
 type Row = Record<string, unknown>
-export const HQ_PROJECTS: Array<Omit<HQProject, 'id' | 'noteCount'>> = [
-  { key: 'babyhub', name: 'BabyHub', description: 'Det prioriterte prosjektet', color: '#9bc8b2' },
-  { key: 'babysential', name: 'Babysential', description: 'Produkt, innhold og vekst', color: '#c8acf0' },
-  { key: 'brrrr', name: 'brRRR', description: 'Eiendom og beslutningsgrunnlag', color: '#e4be82' },
-  { key: 'shared', name: 'Felles kunnskap', description: 'Metoder, research og læring', color: '#83b8dc' },
-]
 export function asObject(value: unknown): Row {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value as Row
   try { const parsed = JSON.parse(String(value || '{}')); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {} } catch { return {} }
@@ -18,9 +12,9 @@ export function asObject(value: unknown): Row {
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : []
 const text = (value: unknown) => typeof value === 'string' ? value : ''
 const date = (value: unknown): string => {
-  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value * 1000).toISOString()
-  if (typeof value === 'string' && Number.isFinite(Date.parse(value))) return new Date(value).toISOString()
-  return ''
+  const parsed = typeof value === 'number' ? new Date(value * 1000)
+    : typeof value === 'string' ? new Date(value) : null
+  return parsed && Number.isFinite(parsed.getTime()) ? parsed.toISOString() : ''
 }
 export function projectKeyFor(name: unknown, slug?: unknown): HQProjectKey | null {
   for (const candidate of [slug, name]) {
@@ -59,6 +53,7 @@ export function mapHQTask(row: Row, notes: HQNote[] = []): HQTask {
   const key = projectKeyFor(row.project_name, row.project_slug) || (['babyhub','babysential','brrrr','shared'].includes(text(hq.project_key)) ? text(hq.project_key) as HQProjectKey : 'shared')
   return {
     id: Number(row.id), title: text(row.title), description: text(row.description), status: text(row.status), priority: text(row.priority),
+    projectName: text(row.project_name) || undefined,
     projectId: typeof row.project_id === 'number' ? row.project_id : null, projectKey: key,
     assignedTo: text(row.assigned_to) || null, ticketRef: row.project_prefix && row.project_ticket_no ? String(row.project_prefix) + '-' + String(row.project_ticket_no).padStart(3,'0') : null,
     updatedAt: date(row.updated_at), sourceIds, learningNoteIds: strings(hq.learning_note_ids), acceptanceCriteria: strings(hq.acceptance_criteria),
@@ -66,20 +61,36 @@ export function mapHQTask(row: Row, notes: HQNote[] = []): HQTask {
     measurementStatus: asObject(hq.measurement).observed_at ? 'observed' : 'unmeasured',
   }
 }
-export function readHQOperations(workspaceId: number, notes: HQNote[], db: Database.Database = getDatabase()) {
-  const rows = db.prepare('SELECT id,name,slug,description,color FROM projects WHERE workspace_id=? AND status=\'active\' ORDER BY id').all(workspaceId) as Row[]
-  const projects: HQProject[] = HQ_PROJECTS.map(project => {
-    const row = rows.find(row => projectKeyFor(row.name, row.slug) === project.key)
-    return { ...project, id: row ? Number(row.id) : null, description: text(row?.description) || project.description, noteCount: notes.filter(note => note.projectKey === project.key).length }
+export function readHQOperations(workspaceId: number, notes: HQNote[], db: Database.Database = getDatabase(), focusedProjectId?: number) {
+  // Project IDs define work membership. Knowledge keys only map the existing approved vault roots.
+  const rows = db.prepare(`SELECT p.id,p.name,p.slug,p.description,p.color,p.github_repo,p.deadline,p.ticket_prefix,
+    COUNT(t.id) AS total,
+    SUM(CASE WHEN t.id IS NOT NULL AND t.status NOT IN ('done','completed','cancelled','archived','failed','wontfix') THEN 1 ELSE 0 END) AS open,
+    SUM(CASE WHEN t.status='in_progress' THEN 1 ELSE 0 END) AS in_progress,
+    SUM(CASE WHEN t.status='blocked' THEN 1 ELSE 0 END) AS blocked,
+    SUM(CASE WHEN t.status IN ('done','completed') THEN 1 ELSE 0 END) AS done
+    FROM projects p LEFT JOIN tasks t ON t.project_id=p.id AND t.workspace_id=p.workspace_id
+    WHERE p.workspace_id=? AND p.status='active' GROUP BY p.id ORDER BY p.name COLLATE NOCASE`).all(workspaceId) as Row[]
+  const assignments = db.prepare(`SELECT paa.project_id,paa.agent_name,paa.role FROM project_agent_assignments paa
+    JOIN projects p ON p.id=paa.project_id WHERE p.workspace_id=? AND p.status='active' ORDER BY paa.agent_name`).all(workspaceId) as Row[]
+  const projects: HQProject[] = rows.map(row => {
+    const key = projectKeyFor(row.name, row.slug) || (row.slug === 'general' ? 'shared' : null)
+    const projectAssignments = assignments.filter(assignment => assignment.project_id === row.id)
+    return { id: Number(row.id), key, name: text(row.name), slug: text(row.slug), ticketPrefix: text(row.ticket_prefix), description: text(row.description),
+      color: /^#[a-f0-9]{6}$/i.test(text(row.color)) ? text(row.color) : '#83b8dc',
+      noteCount: key ? notes.filter(note => note.projectKey === key).length : 0,
+      assignedAgents: projectAssignments.map(assignment => text(assignment.agent_name)),
+      assignedAgentRoles: Object.fromEntries(projectAssignments.filter(assignment => text(assignment.role).trim()).map(assignment => [text(assignment.agent_name), text(assignment.role).trim()])),
+      githubRepo: text(row.github_repo) || null, deadline: date(row.deadline) || null,
+      taskCounts: { total: Number(row.total), open: Number(row.open), inProgress: Number(row.in_progress), blocked: Number(row.blocked), done: Number(row.done) },
+    }
   })
-  const projectIds = projects.map(p => p.id).filter((id): id is number => id !== null)
-  // General-project tasks are shown only when explicitly created through HQ.
-  const predicate = projectIds.length ? 't.project_id IN (' + projectIds.map(() => '?').join(',') + ') OR ' : ''
+  if (focusedProjectId !== undefined && !projects.some(project => project.id === focusedProjectId)) throw new HQInputError('Prosjektet finnes ikke i dette arbeidsområdet.', 404)
   const taskRows = db.prepare(`SELECT t.*,p.name AS project_name,p.slug AS project_slug,p.ticket_prefix AS project_prefix
-    FROM tasks t LEFT JOIN projects p ON p.id=t.project_id AND p.workspace_id=t.workspace_id
-    WHERE t.workspace_id=? AND (${predicate}(json_valid(t.metadata) AND json_extract(t.metadata,'$.hq.origin')='headquarters'))
-    ORDER BY CASE WHEN t.status IN ('in_progress','review','quality_review') THEN 0 WHEN t.status IN ('done','failed','wontfix') THEN 2 ELSE 1 END,
-    CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,t.updated_at DESC LIMIT 200`).all(workspaceId,...projectIds) as Row[]
+    FROM tasks t JOIN projects p ON p.id=t.project_id AND p.workspace_id=t.workspace_id
+    WHERE t.workspace_id=? AND p.status='active' ${focusedProjectId !== undefined ? 'AND p.id=?' : ''}
+    ORDER BY CASE WHEN t.status IN ('in_progress','review','quality_review') THEN 0 WHEN t.status IN ('done','completed','cancelled','archived','failed','wontfix') THEN 2 ELSE 1 END,
+    CASE t.priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,t.updated_at DESC LIMIT 200`).all(workspaceId,...(focusedProjectId !== undefined ? [focusedProjectId] : [])) as Row[]
   const tasks = taskRows.map(row => mapHQTask(row,notes))
   const taskIds = tasks.map(t => t.id)
   let activity: HQActivity[] = []
@@ -100,7 +111,7 @@ export function readHQOperations(workspaceId: number, notes: HQNote[], db: Datab
 export function getHQTask(id: number, workspaceId: number, db: Database.Database = getDatabase()): HQTask | null {
   const row = db.prepare(`SELECT t.*,p.name AS project_name,p.slug AS project_slug,p.ticket_prefix AS project_prefix
     FROM tasks t LEFT JOIN projects p ON p.id=t.project_id AND p.workspace_id=t.workspace_id WHERE t.id=? AND t.workspace_id=?`).get(id,workspaceId) as Row | undefined
-  if (!row || (!projectKeyFor(row.project_name,row.project_slug) && asObject(asObject(row.metadata).hq).origin !== 'headquarters')) return null
+  if (!row || (!row.project_name && asObject(asObject(row.metadata).hq).origin !== 'headquarters')) return null
   return mapHQTask(row)
 }
 export class HQInputError extends Error { constructor(message: string, public status=400) { super(message) } }
@@ -116,8 +127,10 @@ export function createHQTask(input: HQTaskCreateInput, workspaceId: number, acto
       return { id:Number(existing.id),created:false }
     }
     const rows = db.prepare('SELECT id,name,slug FROM projects WHERE workspace_id=? AND status=\'active\' ORDER BY id').all(workspaceId) as Row[]
-    const project = rows.find(row => input.projectKey === 'shared' ? row.slug === 'general' : projectKeyFor(row.name,row.slug) === input.projectKey)
+    const project = rows.find(row => input.projectId !== undefined ? row.id === input.projectId : input.projectKey === 'shared' ? row.slug === 'general' : projectKeyFor(row.name,row.slug) === input.projectKey)
     if (!project) throw new HQInputError('Prosjektet er ikke koblet til MC. Opprett prosjektet i prosjektvelgeren først.',409)
+    const knowledgeKey = projectKeyFor(project.name, project.slug) || 'shared'
+    if (input.projectKey !== knowledgeKey) throw new HQInputError('Kildeprosjektet stemmer ikke med valgt MC-prosjekt.')
     const now = Math.floor(Date.now()/1000)
     db.prepare('UPDATE projects SET ticket_counter=ticket_counter+1,updated_at=? WHERE id=? AND workspace_id=?').run(now,project.id,workspaceId)
     const counter = db.prepare('SELECT ticket_counter FROM projects WHERE id=? AND workspace_id=?').get(project.id,workspaceId) as {ticket_counter:number}

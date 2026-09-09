@@ -18,6 +18,7 @@ export function UpdateBanner() {
   if (updateDismissedVersion === updateAvailable.latestVersion) return null
 
   async function handleUpdate() {
+    if (updateAvailable?.managedRelease) return
     setState('updating')
     setErrorMsg(null)
 
@@ -84,19 +85,21 @@ export function UpdateBanner() {
             <span className="font-medium text-emerald-200">
               {t('updateAvailable', { version: updateAvailable.latestVersion })}
             </span>
-            {t('newerVersionAvailable')}
+            {updateAvailable.managedRelease
+              ? <span className="block mt-1">{updateAvailable.managedUpdateReason || 'Updates for this customized dashboard are tested and installed together.'}</span>
+              : t('newerVersionAvailable')}
           </>
         )}
       </p>
       {!isbusy && (
         <>
-          <button
+          {!updateAvailable.managedRelease && <button
             onClick={handleUpdate}
             disabled={isbusy}
             className="shrink-0 text-2xs font-medium text-emerald-900 bg-emerald-500 hover:bg-emerald-400 px-2.5 py-1 rounded transition-colors"
           >
             {tc('updateNow')}
-          </button>
+          </button>}
           <a
             href={updateAvailable.releaseUrl}
             target="_blank"

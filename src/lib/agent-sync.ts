@@ -99,31 +99,27 @@ function parseIdentityFromFile(content: string): { name?: string; theme?: string
   }
 }
 
-function parseToolsFromFile(content: string): { allow?: string[]; raw?: string } {
-  if (!content.trim()) return {}
+/** TOOLS.md describes a local environment; prose and examples are not permissions. */
+function withoutToolNotes(tools: unknown): any {
+  if (!tools || typeof tools !== 'object' || Array.isArray(tools)) return tools
+  const { raw: _raw, ...configured } = tools as Record<string, unknown>
+  return Object.keys(configured).length ? configured : undefined
+}
 
-  const parsedTools = new Set<string>()
-  for (const line of content.split('\n')) {
-    const cleaned = line.trim()
-    if (!cleaned || cleaned.startsWith('#')) continue
-
-    const listMatch = cleaned.match(/^[-*]\s+`?([^`]+?)`?\s*$/)
-    if (listMatch?.[1]) {
-      parsedTools.add(listMatch[1].trim())
-      continue
-    }
-
-    const inlineMatch = cleaned.match(/^`([^`]+)`$/)
-    if (inlineMatch?.[1]) {
-      parsedTools.add(inlineMatch[1].trim())
-    }
+function resolveConfiguredTools(configData: any): any {
+  const tools = configData.tools
+  if (!tools || typeof tools !== 'object' || !('raw' in tools)) return withoutToolNotes(tools)
+  // Repair records written by the old prose parser without persisting a mutation
+  // during GET. A subsequent config sync writes the canonical policy to the DB.
+  if (typeof configData.openclawId === 'string' && config.openclawConfigPath) {
+    try {
+      const parsed = parseJsonRelaxed<any>(readFileSync(config.openclawConfigPath, 'utf8'))
+      const entry = parsed?.agents?.list?.find((agent: any) => agent.id === configData.openclawId)
+      if (entry) return withoutToolNotes(entry.tools)
+    } catch { /* An unverified prose-derived allowlist must not be exposed. */ }
   }
-
-  const allow = [...parsedTools].filter(Boolean)
-  return {
-    ...(allow.length > 0 ? { allow } : {}),
-    raw: content.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 24).join('\n'),
-  }
+  const { raw: _raw, allow: _derivedAllow, ...rest } = tools
+  return Object.keys(rest).length ? rest : undefined
 }
 
 function getConfigPath(): string | null {
@@ -163,24 +159,21 @@ function readWorkspaceFile(workspace: string | undefined, filename: string): str
 export function enrichAgentConfigFromWorkspace(configData: any): any {
   if (!configData || typeof configData !== 'object') return configData
   const workspace = typeof configData.workspace === 'string' ? configData.workspace : undefined
-  if (!workspace) return configData
+  const tools = resolveConfiguredTools(configData)
+  if (!workspace) return { ...configData, tools }
 
   const identityFile = readWorkspaceFile(workspace, 'identity.md')
-  const toolsFile = readWorkspaceFile(workspace, 'TOOLS.md')
 
   const mergedIdentity = {
     ...parseIdentityFromFile(identityFile || ''),
     ...((configData.identity && typeof configData.identity === 'object') ? configData.identity : {}),
   }
-  const mergedTools = {
-    ...parseToolsFromFile(toolsFile || ''),
-    ...((configData.tools && typeof configData.tools === 'object') ? configData.tools : {}),
-  }
+
 
   return {
     ...configData,
     identity: Object.keys(mergedIdentity).length > 0 ? mergedIdentity : configData.identity,
-    tools: Object.keys(mergedTools).length > 0 ? mergedTools : configData.tools,
+    tools,
   }
 }
 
@@ -243,13 +236,13 @@ export async function syncAgentsFromConfig(actor: string = 'system'): Promise<Sy
   let updated = 0
   const results: SyncResult['agents'] = []
 
-  const findByName = db.prepare('SELECT id, name, role, config, soul_content FROM agents WHERE name = ?')
+  const findByName = db.prepare('SELECT id, name, role, config, soul_content FROM agents WHERE name = ? AND workspace_id = 1')
   const insertAgent = db.prepare(`
-    INSERT INTO agents (name, role, soul_content, status, created_at, updated_at, config)
-    VALUES (?, ?, ?, 'offline', ?, ?, ?)
+    INSERT INTO agents (name, role, soul_content, status, created_at, updated_at, config, workspace_id)
+    VALUES (?, ?, ?, 'offline', ?, ?, ?, 1)
   `)
   const updateAgent = db.prepare(`
-    UPDATE agents SET role = ?, config = ?, soul_content = ?, updated_at = ? WHERE name = ?
+    UPDATE agents SET role = ?, config = ?, soul_content = ?, updated_at = ? WHERE name = ? AND workspace_id = 1
   `)
 
   db.transaction(() => {
@@ -310,7 +303,7 @@ export async function previewSyncDiff(): Promise<SyncDiff> {
   }
 
   const db = getDatabase()
-  const allMCAgents = db.prepare('SELECT name, role, config FROM agents').all() as Array<{ name: string; role: string; config: string }>
+  const allMCAgents = db.prepare('SELECT name, role, config FROM agents WHERE workspace_id = 1').all() as Array<{ name: string; role: string; config: string }>
   const mcNames = new Set(allMCAgents.map(a => a.name))
 
   const newAgents: string[] = []

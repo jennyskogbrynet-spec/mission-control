@@ -95,6 +95,10 @@
     {
       "name": "Docs",
       "description": "API documentation"
+    },
+    {
+      "name": "Headquarters",
+      "description": "Project workspaces, approved vault knowledge, task evidence, and measured outcomes"
     }
   ],
   "paths": {
@@ -11644,6 +11648,2095 @@
           "409": { "description": "Working tree has uncommitted changes" }
         }
       }
+    },
+    "/api/headquarters": {
+      "get": {
+        "tags": [
+          "Headquarters"
+        ],
+        "summary": "Get the headquarters project snapshot",
+        "operationId": "getHeadquarters",
+        "description": "Requires viewer access and the configured HQ_WORKSPACE_ID/HQ_TENANT_ID pair (both default to 1). Returns the active project registry and whole-project task counts, approved vault index, registered agents, and a prioritized selection of at most 200 tasks. projectId limits the task selection to one active project; it does not widen vault access or filter the project registry.",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": false,
+            "description": "Optional active project ID in the authenticated workspace.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current snapshot; Cache-Control: private, no-store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HQSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Snapshot could not be assembled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headquarters/knowledge": {
+      "get": {
+        "tags": [
+          "Headquarters"
+        ],
+        "summary": "Read or search approved headquarters knowledge",
+        "operationId": "getHeadquartersKnowledge",
+        "description": "Requires viewer access and the configured HQ_WORKSPACE_ID/HQ_TENANT_ID pair (both default to 1). Precedence: id reads one approved note; otherwise q searches; otherwise the complete bounded index is returned. project only filters the search and includes shared source knowledge. QMD failures fall back to the local index; at most 40 search results are returned. No arbitrary file path access.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "description": "Opaque note ID from the index. Takes precedence over q.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Search text; an empty value returns a bounded local sample.",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Optional knowledge project filter for search.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "babyhub",
+                "babysential",
+                "brrrr",
+                "shared"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A note with original Markdown, search results, or the index, according to query parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "note",
+                        "content"
+                      ],
+                      "properties": {
+                        "note": {
+                          "$ref": "#/components/schemas/HQNote"
+                        },
+                        "content": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "notes",
+                        "engine"
+                      ],
+                      "properties": {
+                        "notes": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/HQNote"
+                          },
+                          "maxItems": 40
+                        },
+                        "engine": {
+                          "type": "string",
+                          "enum": [
+                            "qmd",
+                            "local"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "$ref": "#/components/schemas/HQKnowledgeIndex"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "description": "Knowledge sources could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headquarters/metrics": {
+      "get": {
+        "tags": [
+          "Headquarters"
+        ],
+        "summary": "Get available headquarters product metrics",
+        "operationId": "getHeadquartersMetrics",
+        "description": "Requires viewer access and the configured HQ_WORKSPACE_ID/HQ_TENANT_ID pair (both default to 1). Returns measured values and explicit source status. Missing providers or upstream failures are represented as unavailable metrics with null values rather than fabricated zeros.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Optional approved metrics project. Omit for all; empty or unknown values are rejected.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "babyhub",
+                "babysential",
+                "brrrr",
+                "shared"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metrics and source availability; Cache-Control: private, no-store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HQMetricsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/headquarters/tasks": {
+      "post": {
+        "tags": [
+          "Headquarters"
+        ],
+        "summary": "Create a source-backed MC task",
+        "operationId": "createHeadquartersTask",
+        "description": "Requires operator access and the configured HQ_WORKSPACE_ID/HQ_TENANT_ID pair (both default to 1). Creates an inbox task with source context, acceptance criteria and expected outcome. Strings are trimmed. The raw request text is limited to 25,000 characters. Reusing a key with the same payload returns the original task; a changed payload conflicts. projectId and projectKey must identify compatible MC and knowledge projects.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HQTaskCreateInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing task for an identical idempotent retry; created is false.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task",
+                    "created"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/HQTask"
+                    },
+                    "created": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Task created; created is true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task",
+                    "created"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/HQTask"
+                    },
+                    "created": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "Idempotency payload conflict or project not available for creation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Raw request text exceeds 25,000 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Task could not be saved. Retry with the same idempotency key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headquarters/tasks/{id}/evidence": {
+      "post": {
+        "tags": [
+          "Headquarters"
+        ],
+        "summary": "Record task evidence and optionally save durable learning",
+        "operationId": "recordHeadquartersTaskEvidence",
+        "description": "Requires operator access and the configured HQ_WORKSPACE_ID/HQ_TENANT_ID pair (both default to 1). Records supplied evidence without marking the task done or inferring measured effect. Repeating identical label/detail/URL deduplicates the result. saveLearning writes a stable note in an approved vault destination; existing changed notes are never overwritten. Raw request text is limited to 15,000 characters.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Task ID in this HQ workspace.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "label",
+                  "detail"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 160
+                  },
+                  "detail": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 6000
+                  },
+                  "url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "description": "Optional HTTP(S) URL without embedded credentials, or an established /api/v1/runs/{id}/provenance path. Empty is treated as absent."
+                  },
+                  "saveLearning": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated HQ task and, when requested, its persisted learning note ID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/HQTask"
+                    },
+                    "learningNoteId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "Evidence capacity reached, unsafe vault destination, or a changed learning note already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Raw request text exceeds 15,000 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Evidence operation could not finish; existing evidence and notes are preserved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent-runtimes/grok/research": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Read saved Grok research runs",
+        "operationId": "getGrokResearch",
+        "description": "Requires operator access. Local Grok research belongs to workspace 1. Omit id to list the latest 20 runs. A persisted running record without ownership in this MC process is reported as interrupted; it is not automatically resumed.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "description": "Optional saved run ID. Omit or leave empty for the list.",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One requested run, or the latest saved runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "run"
+                      ],
+                      "properties": {
+                        "run": {
+                          "$ref": "#/components/schemas/GrokResearchRun"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "runs"
+                      ],
+                      "properties": {
+                        "runs": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/GrokResearchRun"
+                          },
+                          "maxItems": 20
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Start bounded public-web research with Grok Build",
+        "operationId": "startGrokResearch",
+        "description": "Requires operator access. Local Grok research belongs to workspace 1. Starts a new local Grok Build session using the supplied public-web prompt. One active run, at most six turns, three minutes, and 2 MB captured output. It does not invoke Grok Bot. A UUID key identifies one trimmed prompt; identical retries return the existing run. A retained process lock requires reconciliation, not automatic replay.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prompt",
+                  "idempotencyKey"
+                ],
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 6000,
+                    "description": "Nonblank public-web research request. Credential patterns are rejected."
+                  },
+                  "idempotencyKey": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An existing run that is no longer running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "run"
+                  ],
+                  "properties": {
+                    "run": {
+                      "$ref": "#/components/schemas/GrokResearchRun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Run is running; acceptance is not completion.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "run"
+                  ],
+                  "properties": {
+                    "run": {
+                      "$ref": "#/components/schemas/GrokResearchRun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "Invalid UUID/nonblank-length constraint, changed prompt for the same key, unavailable process lock, or launch failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Credential patterns detected in the prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Cancel a Grok research process owned by this server",
+        "operationId": "cancelGrokResearch",
+        "description": "Requires operator access. Cancels only an active process owned by this MC process and the authenticated workspace. It does not cancel orphaned runs in another process or infer that cancellation has completed.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "Run ID to stop.",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation requested; poll the saved run for its final state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "stopping"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "No matching active owned run, including missing or unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}/claim": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Atomically claim an unclaimed task",
+        "operationId": "claimTask",
+        "description": "Requires operator access. Only tasks in the authenticated workspace are considered. Changes claim_state from Unclaimed to Claimed and records the supplied agent and current ISO claim time. This does not change task lifecycle status or start a runtime. A repeated claim returns conflict, even for the same agent.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Existing task ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agent"
+                ],
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Nonblank agent identifier, trimmed before comparison."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Task claimed by the supplied agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task",
+                    "claimed_by"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/ClaimTask"
+                    },
+                    "claimed_by": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "Task is not Unclaimed; includes its current claim state and owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "current_claim_state"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "current_claim_state": {
+                      "type": "string"
+                    },
+                    "claimed_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Task could not be claimed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}/release": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Release a task held by the supplied agent",
+        "operationId": "releaseTask",
+        "description": "Requires operator access. Only tasks in the authenticated workspace are considered. Changes Claimed or Running to Released and clears claimed_by/claimed_at only when body.agent matches the stored owner. There is no admin bypass of this comparison; forced release uses requeue. It does not stop any runtime process.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Existing task ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agent"
+                ],
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Nonblank agent identifier, trimmed before comparison."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Task claim released.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task",
+                    "released_by"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/ClaimTask"
+                    },
+                    "released_by": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "403": {
+            "description": "Insufficient role or supplied agent does not match the current claim owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "claimed_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Task is not currently Claimed or Running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "current_claim_state"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "current_claim_state": {
+                      "type": "string"
+                    },
+                    "claimed_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Task could not be released.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}/requeue": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Requeue an active claim and increment its retry count",
+        "operationId": "requeueTask",
+        "description": "Requires operator access. Only tasks in the authenticated workspace are considered. Moves Claimed or Running back to Unclaimed, clears the owner/time, and increments retry_count atomically. No current-owner comparison is required. Does not stop the previous runtime or redispatch work.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Existing task ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Optional explanation; truncated to 200 characters."
+                  },
+                  "by": {
+                    "type": "string",
+                    "description": "Optional logged actor; truncated to 100 characters. Defaults to authenticated username."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Claim reset to Unclaimed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "task",
+                    "prev_claimed_by",
+                    "retry_count",
+                    "reason"
+                  ],
+                  "properties": {
+                    "task": {
+                      "$ref": "#/components/schemas/ClaimTask"
+                    },
+                    "prev_claimed_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "retry_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "409": {
+            "description": "Task is not currently Claimed or Running, or changed during the operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "current_claim_state"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "current_claim_state": {
+                      "type": "string"
+                    },
+                    "claimed_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Task could not be requeued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/sweep-stalled": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Requeue claims at or beyond the stall threshold",
+        "operationId": "sweepStalledTaskClaims",
+        "description": "Requires operator access. Only tasks in the authenticated workspace are considered. Checks Claimed/Running tasks with valid claim timestamps and requeues those whose age is at least threshold_secs, clearing owners/times and incrementing retry counts in one transaction. Invalid timestamps are skipped. This endpoint itself does not schedule future sweeps or stop/redispatch runtime processes.",
+        "parameters": [
+          {
+            "name": "threshold_secs",
+            "in": "query",
+            "required": false,
+            "description": "Claim age threshold in seconds. Absent, invalid, or negative input uses 300; values above 86400 are capped.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 300
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Number and IDs of requeued tasks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "swept",
+                    "threshold_secs",
+                    "requeued_ids"
+                  ],
+                  "properties": {
+                    "swept": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "threshold_secs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 86400
+                    },
+                    "requeued_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "Stalled claims could not be swept.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compute": {
+      "get": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Read private account capacity and verified harness bindings",
+        "operationId": "getComputeOverview",
+        "description": "Viewer access, primary workspace and tenant only. Reads local persisted observations; never calls a provider. Failed reads retain historical values with their original timestamps and block executable recommendations. No missing values or elapsed reset time are treated as replenished capacity. Response is private, no-store.",
+        "responses": {
+          "200": {
+            "description": "Observed capacity, provenance, and actual collector scheduling state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeOverview"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the stated role and the primary workspace and tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Capacity operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Register private accounts and append capacity observations",
+        "operationId": "mutateComputeLedger",
+        "description": "Admin access, primary workspace and tenant only. Strict action union: upsert_account, upsert_pool, upsert_binding, record_observation. IDs are workspace-scoped opaque identifiers, profileRef never executes a path, and credential-bearing evidence is rejected. Observation externalId is a UUID: exact replay returns created=false and changed evidence conflicts. A successful quota snapshot missing a declared window is stored as failed without discarding last-good history. Account fingerprints with existing observations are immutable; existing quota constraints cannot be silently removed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Definition saved or exact observation replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "saved": {
+                          "const": true
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "saved",
+                        "id"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "created": {
+                          "const": false
+                        },
+                        "externalId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "success",
+                            "failed",
+                            "login_required"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "created",
+                        "externalId",
+                        "status"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New immutable observation receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "const": true
+                    },
+                    "externalId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "success",
+                        "failed",
+                        "login_required"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "created",
+                    "externalId",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, schema, future observation, or undeclared quota window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the stated role and the primary workspace and tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Referenced account, pool or binding is not in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Changed idempotent evidence, identity or immutable ownership/scope conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 100000 characters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Credential detected in evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Capacity operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compute/recommend": {
+      "post": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Preview safe account, harness and model choices without dispatch",
+        "operationId": "recommendCompute",
+        "description": "Viewer access, primary workspace and tenant only. Optional projectId must reference an active project in this workspace. Eligibility requires matching verified account/harness identity, current entitlement, model evidence, capability and difficulty/data-scope fit. All applicable quota pools/windows constrain the minimum remaining percentage. Default reserve is 20%; evidence older than 15 minutes requires refresh and is non-executable, while evidence older than 24 hours is stale. Passed reset timestamps block until a new valid observation; reset credits never imply replenishment. Paid API is excluded unless explicitly requested in allowedBillingModes. A small expiry ranking bonus only applies to ready, valuable, otherwise-executable work. This endpoint cannot start runs or consume quota.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeRecommendationInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ranked candidates, blockers and evidence identifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeRecommendation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid recommendation input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the stated role and the primary workspace and tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found in workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 100000 characters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Capacity operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compute/runs": {
+      "get": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Read subscription-analysis receipts",
+        "operationId": "getSubscriptionAnalysisRuns",
+        "description": "Operator access in workspace 1 and tenant 1 only. With id, returns one no-store receipt; without id (or with an empty id), returns the latest 50 readable receipts. Use the POST idempotency key as id to resolve an uncertain response. This read cannot launch, retry, replenish quota or release a lock.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "description": "Logical run UUID. A nonempty malformed or unknown ID returns 404. Omit to list receipts.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One receipt when id is supplied, otherwise a list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/SubscriptionAnalysisResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SubscriptionAnalysisList"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator role and both primary workspace 1 and primary tenant 1 required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested run is missing or id is malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Requested run evidence is unreadable; local reconciliation is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Could not read subscription analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Start bounded subscription-backed packet analysis",
+        "operationId": "startSubscriptionAnalysisRun",
+        "description": "Operator access in workspace 1 and tenant 1 only. Validates project ownership and optional task/project/workspace membership. Currently launches only Claude Code with its existing first-party Claude.ai subscription login, tools disabled, empty MCP and an isolated temporary directory. Requires an executable compute recommendation with analysis capability, supplied difficulty/data class, subscription billing only and 20% reserve across applicable quotas, plus an exact private account/runtime/fingerprint/model allowlist match. Immediately probes CLI account identity and rereads capacity before spawning; stale or expired-reset evidence requires refresh. No API billing fallback, account switching, repository/web access, task lifecycle change or automatic retry. Same UUID and normalized packet replays its saved receipt without spawning; changed packet conflicts. An installation-wide lock preserves uncertain outcomes. A failed preflight identity probe can return 200 with a failed receipt and no model call. After a lost POST, read the receipt by UUID before any further action.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscriptionAnalysisInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved terminal receipt (including preflight failure) or replay whose status is no longer preflight/running; HTTP success does not imply analysis completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionAnalysisResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted or replayed receipt still in preflight/running; poll GET with the same UUID for the outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionAnalysisResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed JSON, unknown fields, or invalid analysis request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator role and both primary workspace 1 and primary tenant 1 required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Mutation rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found in workspace, or task not found in the selected project and workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Capacity/access not executable, launch allowlist mismatch or unsupported runtime, changed idempotent payload, active/uncertain lock, or unreadable/unpersistable launch evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds 32,768 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Recognizable credentials found in the supplied analysis packet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Could not process subscription analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Request cancellation of an owned analysis child",
+        "operationId": "cancelSubscriptionAnalysisRun",
+        "description": "Operator access in workspace 1 and tenant 1 only. Requests termination only when this server process owns the active child. A 202 response confirms the stop request, not completed termination; read GET for its final receipt. It neither retries a packet nor clears an orphaned lock.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "Run UUID to stop. Missing, malformed, unknown, terminal or unowned IDs return 409.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stop requested; final receipt remains available through GET",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "stopping"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator role and both primary workspace 1 and primary tenant 1 required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Mutation rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No active child is owned by this process",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Compute"
+        ],
+        "summary": "Reconcile an orphaned analysis receipt without retrying",
+        "operationId": "reconcileSubscriptionAnalysisRun",
+        "description": "Operator access in workspace 1 and tenant 1 only. A terminal stored receipt is returned unchanged. For preflight/running/unknown, requires the owner, recorded child and child process group to be gone and the preserved lock to belong to this UUID; then persists interrupted and releases the lock. A missing child PID after possible spawn, ambiguous lock, live process or currently owned run blocks reconciliation and may require local inspection. This operation never resends the packet or claims successful completion.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscriptionAnalysisReconcileInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing terminal receipt or newly interrupted orphan receipt after verified process termination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionAnalysisResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed JSON, invalid UUID/action, or unknown request fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator role and both primary workspace 1 and primary tenant 1 required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Mutation rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No orphaned run exists, evidence is unreadable, a process may still own the run, child identity is missing after possible spawn, or lock identity is unclear/mismatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds 32,768 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Could not reconcile subscription analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -12011,6 +14104,2877 @@
             "type": "integer"
           }
         }
+      },
+      "HQNote": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "title",
+          "projectKey",
+          "kind",
+          "summary",
+          "tags",
+          "modifiedAt",
+          "sourceDate",
+          "wordCount",
+          "linkCount"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path within the approved vault source roots."
+          },
+          "title": {
+            "type": "string"
+          },
+          "projectKey": {
+            "type": "string",
+            "enum": [
+              "babyhub",
+              "babysential",
+              "brrrr",
+              "shared"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "source",
+              "knowledge",
+              "decision",
+              "learning"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "modifiedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceDate": {
+            "description": "Source date from valid metadata; null when absent. Date-only values retain date precision.",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "wordCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "linkCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "HQLink": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "kind"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "wikilink",
+              "markdown",
+              "task-source",
+              "evidence"
+            ]
+          }
+        }
+      },
+      "HQSourceStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "state",
+          "checkedAt",
+          "detail"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "HQCoverage": {
+        "type": "object",
+        "required": [
+          "indexed",
+          "limit",
+          "truncated",
+          "excluded"
+        ],
+        "properties": {
+          "indexed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "excluded": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "HQKnowledgeIndex": {
+        "type": "object",
+        "required": [
+          "notes",
+          "links",
+          "sources",
+          "coverage"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQNote"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQLink"
+            }
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQSourceStatus"
+            }
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/HQCoverage"
+          }
+        }
+      },
+      "HQProject": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "name",
+          "description",
+          "color",
+          "noteCount"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "key": {
+            "enum": [
+              "babyhub",
+              "babysential",
+              "brrrr",
+              "shared",
+              null
+            ],
+            "description": "Approved knowledge mapping; null when this registry project has no configured source root."
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "noteCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "slug": {
+            "type": "string"
+          },
+          "ticketPrefix": {
+            "type": "string"
+          },
+          "assignedAgents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "githubRepo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deadline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "taskCounts": {
+            "type": "object",
+            "required": [
+              "total",
+              "open",
+              "inProgress",
+              "blocked",
+              "done"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "open": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "inProgress": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "blocked": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "done": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "HQEvidence": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "HTTP(S) source URL or a relative /api/v1/runs/{id}/provenance path."
+          },
+          "detail": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        }
+      },
+      "HQTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "description",
+          "status",
+          "priority",
+          "projectId",
+          "projectKey",
+          "assignedTo",
+          "ticketRef",
+          "updatedAt",
+          "sourceIds",
+          "acceptanceCriteria",
+          "expectedOutcome",
+          "evidence",
+          "measurementStatus"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "projectKey": {
+            "type": "string",
+            "enum": [
+              "babyhub",
+              "babysential",
+              "brrrr",
+              "shared"
+            ]
+          },
+          "assignedTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ticketRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "ISO timestamp, or empty when the stored time is unavailable."
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "learningNoteIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "acceptanceCriteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expectedOutcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQEvidence"
+            }
+          },
+          "measurementStatus": {
+            "type": "string",
+            "enum": [
+              "unmeasured",
+              "observed"
+            ]
+          }
+        }
+      },
+      "HQSnapshot": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HQKnowledgeIndex"
+          },
+          {
+            "type": "object",
+            "required": [
+              "generatedAt",
+              "projects",
+              "tasks",
+              "agents",
+              "activity"
+            ],
+            "properties": {
+              "generatedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HQProject"
+                }
+              },
+              "tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HQTask"
+                },
+                "maxItems": 200
+              },
+              "agents": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "role",
+                    "status",
+                    "updatedAt"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    }
+                  }
+                }
+              },
+              "activity": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "description",
+                    "actor",
+                    "createdAt"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "actor": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "taskId": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HQMetric": {
+        "type": "object",
+        "required": [
+          "id",
+          "projectKey",
+          "name",
+          "provider",
+          "value",
+          "unit",
+          "status",
+          "checkedAt",
+          "period",
+          "definition"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "projectKey": {
+            "type": "string",
+            "enum": [
+              "babyhub",
+              "babysential",
+              "brrrr",
+              "shared"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Null means unavailable or unmeasured; an observed zero remains numeric zero."
+          },
+          "unit": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "live",
+              "snapshot",
+              "unavailable",
+              "needs_review"
+            ]
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period": {
+            "type": "string"
+          },
+          "definition": {
+            "type": "string"
+          },
+          "sourceUrl": {
+            "type": "string"
+          },
+          "warning": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "count"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "date",
+                "value"
+              ],
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "HQMetricsResponse": {
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "metrics",
+          "sources"
+        ],
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQMetric"
+            }
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HQSourceStatus"
+            }
+          }
+        }
+      },
+      "HQTaskCreateInput": {
+        "type": "object",
+        "required": [
+          "title",
+          "description",
+          "projectKey",
+          "sourceIds",
+          "acceptanceCriteria",
+          "expectedOutcome",
+          "priority",
+          "idempotencyKey"
+        ],
+        "properties": {
+          "projectId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Existing active project ID in the authenticated workspace. When omitted, projectKey resolves to its established project; shared resolves to General."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 10000
+          },
+          "projectKey": {
+            "type": "string",
+            "enum": [
+              "babyhub",
+              "babysential",
+              "brrrr",
+              "shared"
+            ]
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "Duplicate IDs are collapsed. Sources must exist in the approved index and belong to the selected knowledge project or shared knowledge."
+          },
+          "acceptanceCriteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 500
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "expectedOutcome": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "urgent"
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{16,100}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GrokResearchRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "status",
+          "prompt",
+          "model",
+          "startedAt",
+          "finishedAt",
+          "reply",
+          "error",
+          "sessionId",
+          "costUsd"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "workspaceId": {
+            "type": "integer",
+            "const": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "partial",
+              "failed",
+              "interrupted"
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp in milliseconds."
+          },
+          "finishedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp in milliseconds, or null while running."
+          },
+          "reply": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Reported complete cost in USD; null when missing or partial."
+          }
+        }
+      },
+      "ClaimTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "claim_state",
+          "claimed_by",
+          "claimed_at",
+          "tags",
+          "metadata"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "integer"
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "project_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ticket_ref": {
+            "type": "string"
+          },
+          "claim_state": {
+            "type": "string"
+          },
+          "claimed_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ],
+            "description": "Claim time. New claims use an ISO timestamp; cleared on release or requeue."
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "metadata": {
+            "type": "object"
+          }
+        },
+        "description": "Existing task row with parsed tags/metadata and claim fields. Claim state is separate from the task lifecycle status; these operations do not start or stop runtime processes."
+      },
+      "ComputeSource": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "provider_api",
+              "cli",
+              "browser",
+              "manual",
+              "import"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "evidenceRef": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "kind",
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "ComputeMutation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "upsert_account"
+              },
+              "account": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "plan": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "billingMode": {
+                    "type": "string",
+                    "enum": [
+                      "subscription",
+                      "api",
+                      "local",
+                      "unknown"
+                    ]
+                  },
+                  "enabled": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "monthlyCost": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "currency": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "identityFingerprint": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "provider",
+                  "plan",
+                  "billingMode"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "account"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "upsert_pool"
+              },
+              "pool": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "accountId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "modelIds": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+                    }
+                  },
+                  "windowKeys": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "accountId",
+                  "key",
+                  "label",
+                  "modelIds",
+                  "windowKeys"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "pool"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "upsert_binding"
+              },
+              "binding": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "accountId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "runtimeId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "profileRef": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  },
+                  "modelIds": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+                    }
+                  },
+                  "capabilities": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                    }
+                  },
+                  "poolIds": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                    }
+                  },
+                  "dataClasses": {
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "public",
+                        "internal",
+                        "restricted"
+                      ]
+                    }
+                  },
+                  "enabled": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "modelCapabilities": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "modelId": {
+                          "type": "string",
+                          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+                        },
+                        "tier": {
+                          "type": "string",
+                          "enum": [
+                            "fast",
+                            "balanced",
+                            "deep"
+                          ]
+                        },
+                        "capabilities": {
+                          "maxItems": 64,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                          }
+                        },
+                        "notes": {
+                          "type": "string",
+                          "maxLength": 1000
+                        },
+                        "verifiedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "evidence": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "modelId",
+                        "tier",
+                        "capabilities",
+                        "notes",
+                        "verifiedAt",
+                        "evidence"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "accountId",
+                  "runtimeId",
+                  "profileRef",
+                  "modelIds",
+                  "capabilities",
+                  "poolIds",
+                  "dataClasses",
+                  "modelCapabilities"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "action",
+              "binding"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "record_observation"
+              },
+              "observation": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "externalId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "observedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "provider_api",
+                              "cli",
+                              "browser",
+                              "manual",
+                              "import"
+                            ]
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "evidenceRef": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "label"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "success",
+                          "failed",
+                          "login_required"
+                        ]
+                      },
+                      "error": {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      "kind": {
+                        "type": "string",
+                        "const": "quota"
+                      },
+                      "accountId": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                      },
+                      "poolId": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                      },
+                      "windows": {
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                            },
+                            "label": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            "usedPercent": {
+                              "anyOf": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "remainingPercent": {
+                              "anyOf": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "limit": {
+                              "anyOf": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "used": {
+                              "anyOf": [
+                                {
+                                  "type": "number",
+                                  "minimum": 0
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "unit": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                            },
+                            "resetsAt": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "key",
+                            "label",
+                            "unit",
+                            "resetsAt"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "externalId",
+                      "observedAt",
+                      "source",
+                      "status",
+                      "kind",
+                      "accountId",
+                      "poolId",
+                      "windows"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "externalId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "observedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "provider_api",
+                              "cli",
+                              "browser",
+                              "manual",
+                              "import"
+                            ]
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "evidenceRef": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "label"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "success",
+                          "failed",
+                          "login_required"
+                        ]
+                      },
+                      "error": {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      "kind": {
+                        "type": "string",
+                        "const": "access"
+                      },
+                      "accountId": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                      },
+                      "bindingId": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "identityFingerprint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "identityVerified": {
+                        "type": "boolean"
+                      },
+                      "entitlementVerified": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "externalId",
+                      "observedAt",
+                      "source",
+                      "status",
+                      "kind",
+                      "accountId",
+                      "identityFingerprint",
+                      "identityVerified",
+                      "entitlementVerified"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "externalId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "observedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "provider_api",
+                              "cli",
+                              "browser",
+                              "manual",
+                              "import"
+                            ]
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "evidenceRef": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "label"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "success",
+                          "failed",
+                          "login_required"
+                        ]
+                      },
+                      "error": {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      "kind": {
+                        "type": "string",
+                        "const": "reset"
+                      },
+                      "accountId": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                      },
+                      "available": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "event": {
+                        "type": "string",
+                        "enum": [
+                          "availability",
+                          "redeemed"
+                        ]
+                      },
+                      "note": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    },
+                    "required": [
+                      "externalId",
+                      "observedAt",
+                      "source",
+                      "status",
+                      "kind",
+                      "accountId",
+                      "available",
+                      "event"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "externalId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "observedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "provider_api",
+                              "cli",
+                              "browser",
+                              "manual",
+                              "import"
+                            ]
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "evidenceRef": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "label"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "success",
+                          "failed",
+                          "login_required"
+                        ]
+                      },
+                      "error": {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      "kind": {
+                        "type": "string",
+                        "const": "collector"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "intervalHours": {
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 168
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "nextDueAt": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "jobRef": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "externalId",
+                      "observedAt",
+                      "source",
+                      "status",
+                      "kind",
+                      "enabled",
+                      "intervalHours",
+                      "nextDueAt",
+                      "jobRef"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "observation"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ComputeWindow": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "usedPercent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remainingPercent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "resetsAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ComputeSource"
+          },
+          "freshness": {
+            "type": "string",
+            "enum": [
+              "fresh",
+              "refresh_due",
+              "stale",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "usedPercent",
+          "remainingPercent",
+          "limit",
+          "used",
+          "unit",
+          "resetsAt",
+          "observedAt",
+          "source",
+          "freshness"
+        ]
+      },
+      "ComputePool": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "modelIds": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+            }
+          },
+          "windowKeys": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+            }
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputeWindow"
+            }
+          },
+          "effectiveRemainingPercent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "refresh_required",
+              "stale",
+              "exhausted",
+              "reset_unconfirmed",
+              "unavailable",
+              "unknown"
+            ]
+          },
+          "observedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastGoodObservedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComputeSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastObservationStatus": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "success",
+                  "failed",
+                  "login_required"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "key",
+          "label",
+          "modelIds",
+          "windowKeys",
+          "windows",
+          "effectiveRemainingPercent",
+          "status",
+          "observedAt",
+          "lastGoodObservedAt",
+          "source",
+          "observationId",
+          "lastObservationStatus",
+          "error"
+        ]
+      },
+      "ComputeBinding": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "runtimeId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "profileRef": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "modelIds": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+            }
+          },
+          "capabilities": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+            }
+          },
+          "poolIds": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+            }
+          },
+          "dataClasses": {
+            "minItems": 1,
+            "maxItems": 3,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "public",
+                "internal",
+                "restricted"
+              ]
+            }
+          },
+          "enabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "modelCapabilities": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "modelId": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$"
+                },
+                "tier": {
+                  "type": "string",
+                  "enum": [
+                    "fast",
+                    "balanced",
+                    "deep"
+                  ]
+                },
+                "capabilities": {
+                  "maxItems": 64,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+                  }
+                },
+                "notes": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "verifiedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "evidence": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "modelId",
+                "tier",
+                "capabilities",
+                "notes",
+                "verifiedAt",
+                "evidence"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "identityStatus": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "unverified",
+              "unknown"
+            ]
+          },
+          "entitlementStatus": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "unverified",
+              "unknown"
+            ]
+          },
+          "verifiedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verificationFreshness": {
+            "type": "string",
+            "enum": [
+              "fresh",
+              "refresh_due",
+              "stale",
+              "unknown"
+            ]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComputeSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "runtimeId",
+          "profileRef",
+          "modelIds",
+          "capabilities",
+          "poolIds",
+          "dataClasses",
+          "enabled",
+          "modelCapabilities",
+          "identityStatus",
+          "entitlementStatus",
+          "verifiedAt",
+          "verificationFreshness",
+          "source",
+          "observationId"
+        ]
+      },
+      "ComputeAccount": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "provider": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "billingMode": {
+            "type": "string",
+            "enum": [
+              "subscription",
+              "api",
+              "local",
+              "unknown"
+            ]
+          },
+          "enabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "monthlyCost": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Z]{3}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identityFingerprint": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputePool"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "login_required",
+              "unknown",
+              "disabled",
+              "unavailable"
+            ]
+          },
+          "observedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComputeSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resetCredits": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "available": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "observedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "source": {
+                    "$ref": "#/components/schemas/ComputeSource"
+                  },
+                  "freshness": {
+                    "type": "string",
+                    "enum": [
+                      "fresh",
+                      "refresh_due",
+                      "stale",
+                      "unknown"
+                    ]
+                  },
+                  "event": {
+                    "type": "string",
+                    "enum": [
+                      "availability",
+                      "redeemed"
+                    ]
+                  }
+                },
+                "required": [
+                  "available",
+                  "observedAt",
+                  "source",
+                  "freshness",
+                  "event"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "provider",
+          "plan",
+          "billingMode",
+          "enabled",
+          "pools",
+          "status",
+          "observedAt",
+          "source",
+          "resetCredits"
+        ]
+      },
+      "ComputeOverview": {
+        "type": "object",
+        "properties": {
+          "asOf": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputeAccount"
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputeBinding"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "refresh": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "intervalHours": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastAttemptAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastSuccessAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nextDueAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "not_configured",
+                  "success",
+                  "failed",
+                  "login_required"
+                ]
+              },
+              "lastError": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled",
+              "intervalHours",
+              "lastAttemptAt",
+              "lastSuccessAt",
+              "nextDueAt",
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "asOf",
+          "accounts",
+          "bindings",
+          "warnings",
+          "refresh"
+        ]
+      },
+      "ComputeRecommendationInput": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "requiredCapabilities": {
+            "maxItems": 64,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+            }
+          },
+          "difficulty": {
+            "type": "string",
+            "enum": [
+              "routine",
+              "standard",
+              "complex"
+            ]
+          },
+          "dataClass": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "restricted"
+            ]
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "valuable": {
+            "type": "boolean"
+          },
+          "reservePercent": {
+            "default": 20,
+            "type": "number",
+            "minimum": 0,
+            "maximum": 90
+          },
+          "allowedBillingModes": {
+            "default": [
+              "subscription",
+              "local"
+            ],
+            "minItems": 1,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "subscription",
+                "api",
+                "local",
+                "unknown"
+              ]
+            }
+          }
+        },
+        "required": [
+          "requiredCapabilities",
+          "difficulty",
+          "dataClass",
+          "ready",
+          "valuable"
+        ],
+        "additionalProperties": false
+      },
+      "ComputeRecommendation": {
+        "type": "object",
+        "properties": {
+          "asOf": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reservePercent": {
+            "type": "number"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "bindingId": {
+                  "type": "string"
+                },
+                "accountId": {
+                  "type": "string"
+                },
+                "runtimeId": {
+                  "type": "string"
+                },
+                "modelId": {
+                  "type": "string"
+                },
+                "executable": {
+                  "type": "boolean"
+                },
+                "refreshRecommended": {
+                  "type": "boolean"
+                },
+                "effectiveRemainingPercent": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reasonCodes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "account_disabled",
+                      "binding_disabled",
+                      "billing_not_allowed",
+                      "identity_unverified",
+                      "entitlement_unverified",
+                      "access_refresh_required",
+                      "access_stale",
+                      "capability_mismatch",
+                      "model_unverified",
+                      "difficulty_mismatch",
+                      "data_scope_mismatch",
+                      "quota_not_configured",
+                      "quota_unknown",
+                      "quota_unavailable",
+                      "quota_refresh_required",
+                      "quota_stale",
+                      "quota_exhausted",
+                      "reset_unconfirmed",
+                      "reserve_protected",
+                      "task_not_ready",
+                      "task_not_valuable",
+                      "ready"
+                    ]
+                  }
+                },
+                "evidenceObservationIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "score": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "bindingId",
+                "accountId",
+                "runtimeId",
+                "modelId",
+                "executable",
+                "refreshRecommended",
+                "effectiveRemainingPercent",
+                "reasonCodes",
+                "evidenceObservationIds",
+                "score"
+              ]
+            }
+          }
+        },
+        "required": [
+          "asOf",
+          "reservePercent",
+          "candidates"
+        ]
+      },
+      "SubscriptionAnalysisInput": {
+        "type": "object",
+        "properties": {
+          "idempotencyKey": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-generated logical request ID; also the returned run.id. Preserve it and the exact packet after an uncertain HTTP response."
+          },
+          "projectId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Project belonging to workspace 1."
+          },
+          "bindingId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}$"
+          },
+          "modelId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]{0,199}$",
+            "description": "Exact verified model ID on the selected binding and private launch allowlist. No model fallback."
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12000,
+            "description": "Supplied analysis packet, trimmed before validation and hashing. Maximum 12,000 JavaScript string code units after trimming. Recognizable credentials are rejected; public/internal classification is caller-supplied."
+          },
+          "difficulty": {
+            "type": "string",
+            "enum": [
+              "routine",
+              "standard",
+              "complex"
+            ]
+          },
+          "dataClass": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal"
+            ]
+          },
+          "taskId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional receipt association. Task must belong to this project and workspace; analysis does not claim, implement or change its status."
+          }
+        },
+        "required": [
+          "idempotencyKey",
+          "projectId",
+          "bindingId",
+          "modelId",
+          "prompt",
+          "difficulty",
+          "dataClass"
+        ],
+        "additionalProperties": false,
+        "description": "Strict packet-analysis request. JSON body must not exceed 32,768 bytes, including when Content-Length is absent. No executable, working directory, environment, authentication or fallback fields are accepted."
+      },
+      "SubscriptionAnalysisRun": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "integer",
+            "const": 1
+          },
+          "projectId": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "taskId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "bindingId": {
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "runtimeId": {
+            "type": "string",
+            "description": "Selected runtime identity. This packet-analysis implementation launches only claude-code."
+          },
+          "mode": {
+            "type": "string",
+            "const": "packet_analysis"
+          },
+          "requestedModel": {
+            "type": "string"
+          },
+          "observedModel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reported model ID only when observedModels contains exactly one entry. Null for missing or multiple reported models; never inferred from requestedModel."
+          },
+          "observedModels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "All model IDs from the successful terminal envelope modelUsage keys. Empty when not reported. Any reported ID different from requestedModel prevents completed, including a mixed requested/unexpected set."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "preflight",
+              "running",
+              "completed",
+              "failed",
+              "interrupted",
+              "unknown"
+            ],
+            "description": "preflight/running are pending; completed has validated output; failed records a preflight or result failure; interrupted records cancellation, limits or reconciled orphaning. unknown preserves uncertainty when the owner ended or post-launch evidence could not be saved; it is not proof that the child stopped."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Validated and trimmed original packet, retained in the private local receipt."
+          },
+          "reply": {
+            "type": "string",
+            "maxLength": 100000,
+            "description": "Final Markdown analysis, otherwise empty. Render as untrusted content with raw HTML and unsafe links disabled; do not fetch remote images."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Assigned Claude session ID, when available; terminal output must match it."
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finishedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "estimatedCostUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Nonnegative finite client-reported token-price estimate when available. Not a subscription invoice, cash charge or remaining quota."
+          },
+          "billedCostUsd": {
+            "type": "null",
+            "description": "No billing amount is established by this subscription mode."
+          },
+          "evidenceObservationIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Compute observation IDs supporting the checked account, entitlement and quota gates."
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit scope and evidence limits retained with the result."
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "projectId",
+          "taskId",
+          "bindingId",
+          "accountId",
+          "runtimeId",
+          "mode",
+          "requestedModel",
+          "observedModel",
+          "observedModels",
+          "status",
+          "prompt",
+          "reply",
+          "error",
+          "sessionId",
+          "startedAt",
+          "finishedAt",
+          "estimatedCostUsd",
+          "billedCostUsd",
+          "evidenceObservationIds",
+          "limitations"
+        ],
+        "additionalProperties": false,
+        "description": "Private local receipt for analysis of the supplied text only. No repository files, web sources, tests or implementation are accessed. Completion is advisory and does not certify implementation. Stored process IDs and request hashes are not exposed. Bounds: 10 minutes, 8 Claude turns, 2,000,000 combined stdout/stderr bytes and 100,000 reply string code units. No automatic retry or model/provider fallback."
+      },
+      "SubscriptionAnalysisResponse": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/SubscriptionAnalysisRun"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "additionalProperties": false
+      },
+      "SubscriptionAnalysisList": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionAnalysisRun"
+            },
+            "description": "Latest readable receipts sorted by startedAt descending; unreadable entries are omitted from the list."
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "additionalProperties": false
+      },
+      "SubscriptionAnalysisReconcileInput": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "reconcile"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "additionalProperties": false,
+        "description": "Strict request, at most 32,768 JSON bytes. Reconcile existing evidence without resending the packet."
       }
     },
     "responses": {
@@ -12056,6 +17020,16 @@
       },
       "RateLimited": {
         "description": "Rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "Server error",
         "content": {
           "application/json": {
             "schema": {

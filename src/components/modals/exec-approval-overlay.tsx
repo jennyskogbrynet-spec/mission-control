@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { useMissionControl, type ExecApprovalRequest } from '@/store'
-import { useWebSocket } from '@/lib/websocket'
+import { resolveExecutionApproval } from '@/lib/exec-approval-client'
 
 const RISK_BORDER: Record<ExecApprovalRequest['risk'], string> = {
   low: 'border-l-green-500',
@@ -41,20 +41,20 @@ function MetaRow({ label, value }: { label: string; value?: string | null }) {
 
 export function ExecApprovalOverlay() {
   const { execApprovals, updateExecApproval } = useMissionControl()
-  const { sendMessage } = useWebSocket()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [, setTick] = useState(0)
 
   const pending = execApprovals.filter(a => a.status === 'pending')
   const active = pending[0]
+  const activeId = active?.id
 
   // Tick every second to update expiry countdown
   useEffect(() => {
-    if (!active) return
+    if (!activeId) return
     const interval = setInterval(() => setTick(t => t + 1), 1000)
     return () => clearInterval(interval)
-  }, [active?.id])
+  }, [activeId])
 
   // Auto-expire client-side
   useEffect(() => {
@@ -69,41 +69,16 @@ export function ExecApprovalOverlay() {
     setBusy(true)
     setError(null)
 
-    // Try WebSocket RPC first
-    const sent = sendMessage({
-      type: 'req',
-      method: 'exec.approval.resolve',
-      id: `ea-${Date.now()}`,
-      params: { id: active.id, decision },
-    })
-
-    if (!sent) {
-      // Fallback to HTTP
-      try {
-        const action = decision === 'deny' ? 'deny' : decision === 'allow-always' ? 'always_allow' : 'approve'
-        const res = await fetch('/api/exec-approvals', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: active.id, action }),
-        })
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}))
-          setError(data.error || 'Failed to send decision')
-          setBusy(false)
-          return
-        }
-      } catch {
-        setError('Failed to reach gateway')
-        setBusy(false)
-        return
-      }
+    try {
+      await resolveExecutionApproval(active.id, decision)
+      const newStatus = decision === 'deny' ? 'denied' : 'approved'
+      updateExecApproval(active.id, { status: newStatus })
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to reach gateway')
+    } finally {
+      setBusy(false)
     }
-
-    // Optimistic update
-    const newStatus = decision === 'deny' ? 'denied' : 'approved'
-    updateExecApproval(active.id, { status: newStatus as ExecApprovalRequest['status'] })
-    setBusy(false)
-  }, [active, busy, sendMessage, updateExecApproval])
+  }, [active, busy, updateExecApproval])
 
   if (!active) return null
 

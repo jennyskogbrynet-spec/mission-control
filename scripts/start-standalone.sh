@@ -43,4 +43,12 @@ fi
 # Next.js standalone server reads HOSTNAME to decide bind address.
 # Default to 0.0.0.0 so the server is accessible from outside the host.
 export HOSTNAME="${HOSTNAME:-0.0.0.0}"
-exec node server.js
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+if [[ -z "$NODE_BIN" && -x /opt/homebrew/opt/node/bin/node ]]; then
+  NODE_BIN=/opt/homebrew/opt/node/bin/node
+fi
+if [[ -z "$NODE_BIN" ]]; then
+  echo "error: node executable not found" >&2
+  exit 127
+fi
+exec "$NODE_BIN" server.js

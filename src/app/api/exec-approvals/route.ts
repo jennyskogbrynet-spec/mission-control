@@ -4,10 +4,7 @@ import { requireRole } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { logger } from '@/lib/logger'
 import path from 'node:path'
-
-function gatewayUrl(p: string): string {
-  return `http://${config.gatewayHost}:${config.gatewayPort}${p}`
-}
+import { callOpenClawGateway } from '@/lib/openclaw-gateway'
 
 function execApprovalsPath(): string {
   return path.join(config.openclawHome, 'exec-approvals.json')
@@ -24,6 +21,9 @@ function computeHash(raw: string): string {
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local execution approvals belong to the primary workspace only' }, { status: 403 })
+  }
 
   const action = request.nextUrl.searchParams.get('action')
 
@@ -31,31 +31,21 @@ export async function GET(request: NextRequest) {
     return getAllowlist()
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
-
   try {
-    const res = await fetch(gatewayUrl('/api/exec-approvals'), {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' },
-    })
-    clearTimeout(timeout)
-
-    if (!res.ok) {
-      logger.warn({ status: res.status }, 'Gateway exec-approvals endpoint returned error')
-      return NextResponse.json({ approvals: [] })
-    }
-
-    const data = await res.json()
-    return NextResponse.json(data)
-  } catch (err: any) {
-    clearTimeout(timeout)
-    if (err.name === 'AbortError') {
-      logger.warn('Gateway exec-approvals request timed out')
-    } else {
-      logger.warn({ err }, 'Gateway exec-approvals unreachable')
-    }
-    return NextResponse.json({ approvals: [] })
+    const pending = await callOpenClawGateway<Array<{
+      id: string; createdAtMs: number; expiresAtMs?: number;
+      request: { sessionKey?: string; agentId?: string; command?: string; cwd?: string; host?: string; resolvedPath?: string }
+    }>>('exec.approval.list', {}, 10000)
+    if (!Array.isArray(pending)) throw new Error('Invalid approvals list')
+    return NextResponse.json({ approvals: pending.map(entry => ({
+      id: entry.id, sessionId: entry.request?.sessionKey || '', agentName: entry.request?.agentId,
+      toolName: 'exec', toolArgs: {}, command: entry.request?.command, cwd: entry.request?.cwd,
+      host: entry.request?.host, resolvedPath: entry.request?.resolvedPath,
+      risk: 'medium', createdAt: entry.createdAtMs, expiresAt: entry.expiresAtMs, status: 'pending',
+    })) })
+  } catch {
+    logger.warn('Gateway execution approval list unavailable')
+    return NextResponse.json({ error: 'Execution approval queue unavailable. Check the gateway connection.' }, { status: 502 })
   }
 }
 
@@ -93,6 +83,9 @@ async function getAllowlist(): Promise<NextResponse> {
 export async function PUT(request: NextRequest) {
   const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local execution approvals belong to the primary workspace only' }, { status: 403 })
+  }
 
   let body: { agents: Record<string, { pattern: string }[]>; hash?: string }
   try {
@@ -163,6 +156,9 @@ export async function PUT(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local execution approvals belong to the primary workspace only' }, { status: 403 })
+  }
 
   let body: { id: string; action: string; reason?: string }
   try {
@@ -180,31 +176,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` }, { status: 400 })
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
-
+  const decision = body.action === 'deny' ? 'deny' : body.action === 'always_allow' ? 'allow-always' : 'allow-once'
   try {
-    const res = await fetch(gatewayUrl('/api/exec-approvals/respond'), {
-      method: 'POST',
-      signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: body.id,
-        action: body.action,
-        reason: body.reason,
-      }),
-    })
-    clearTimeout(timeout)
-
-    const data = await res.json()
-    return NextResponse.json(data, { status: res.status })
-  } catch (err: any) {
-    clearTimeout(timeout)
-    if (err.name === 'AbortError') {
-      logger.error('Gateway exec-approvals respond request timed out')
-      return NextResponse.json({ error: 'Gateway request timed out' }, { status: 504 })
-    }
-    logger.error({ err }, 'Gateway exec-approvals respond failed')
-    return NextResponse.json({ error: 'Gateway unreachable' }, { status: 502 })
+    const result = await callOpenClawGateway<{ ok?: boolean }>('exec.approval.resolve', { id: body.id, decision }, 10000)
+    if (result?.ok !== true) throw new Error('Decision not acknowledged')
+    return NextResponse.json({ ok: true, id: body.id, decision })
+  } catch {
+    logger.warn('Gateway execution approval decision not confirmed')
+    return NextResponse.json({ error: 'The gateway did not confirm this decision. The request may have expired, been resolved elsewhere, or require a different policy.' }, { status: 502 })
   }
 }

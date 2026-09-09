@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
+import { useAgentWake } from '@/lib/use-agent-wake'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 import { createClientLogger } from '@/lib/client-logger'
 import { AgentAvatar } from '@/components/ui/agent-avatar'
@@ -202,28 +203,7 @@ export function AgentSquadPanelPhase3() {
     }
   }
 
-  // Wake agent via session_send
-  const wakeAgent = async (agentName: string, sessionKey: string) => {
-    try {
-      const response = await fetch(`/api/agents/${agentName}/wake`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: `🤖 **Wake Up Call**\n\nAgent ${agentName}, you have been manually woken up.\nCheck Mission Control for any pending tasks or notifications.\n\n⏰ ${new Date().toLocaleString()}`
-        })
-      })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}))
-        throw new Error(data.error || 'Failed to wake agent')
-      }
-
-      await updateAgentStatus(agentName, 'idle', 'Manually woken via session')
-    } catch (error) {
-      log.error('Failed to wake agent:', error)
-      setError('Failed to wake agent')
-    }
-  }
+  const { wakeAgent, wakingAgents } = useAgentWake(fetchAgents, setError)
 
   // Re-fetch when showHidden changes
   useEffect(() => {
@@ -484,15 +464,16 @@ export function AgentSquadPanelPhase3() {
                       {formatLastSeen(agent.last_seen)}
                     </span>
                     <div className="flex gap-1">
-                      {agent.session_key ? (
+                      {(agent.command_session_key || agent.session_key) ? (
                         <Button
                           onClick={(e) => {
                             e.stopPropagation()
-                            wakeAgent(agent.name, agent.session_key!)
+                            wakeAgent(agent.name, (agent.command_session_key || agent.session_key)!)
                           }}
                           size="xs"
                           variant="ghost"
                           className="h-6 px-2 text-xs text-cyan-300 hover:bg-cyan-500/15 hover:text-cyan-200"
+                          disabled={wakingAgents.has(agent.name)}
                           title="Wake agent via session"
                         >
                           {t('wake')}
@@ -551,6 +532,7 @@ export function AgentSquadPanelPhase3() {
           onUpdate={fetchAgents}
           onStatusUpdate={updateAgentStatus}
           onWakeAgent={wakeAgent}
+          waking={wakingAgents.has(selectedAgent.name)}
           onDelete={deleteAgent}
         />
       )}
@@ -585,6 +567,7 @@ function AgentDetailModalPhase3({
   onUpdate,
   onStatusUpdate,
   onWakeAgent,
+  waking,
   onDelete
 }: {
   agent: Agent
@@ -592,6 +575,7 @@ function AgentDetailModalPhase3({
   onUpdate: () => void
   onStatusUpdate: (name: string, status: Agent['status'], activity?: string) => Promise<void>
   onWakeAgent: (name: string, sessionKey: string) => Promise<void>
+  waking: boolean
   onDelete: (agentId: number, removeWorkspace: boolean) => Promise<void>
 }) {
   const [agentState, setAgentState] = useState<Agent & { config?: any; working_memory?: string }>(agent as Agent & { config?: any; working_memory?: string })
@@ -981,6 +965,7 @@ function AgentDetailModalPhase3({
               saveBusy={saveBusy}
               onStatusUpdate={onStatusUpdate}
               onWakeAgent={onWakeAgent}
+              waking={waking}
               onEdit={() => setEditing(true)}
               onCancel={() => setEditing(false)}
               heartbeatData={heartbeatData}

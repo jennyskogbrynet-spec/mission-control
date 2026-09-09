@@ -5,6 +5,7 @@ import { join } from 'path'
 import { requireRole } from '@/lib/auth'
 import { getDatabase } from '@/lib/db'
 import { APP_VERSION } from '@/lib/version'
+import { getManagedReleasePolicy } from '@/lib/managed-release'
 
 const UPDATE_TIMEOUT = 5 * 60 * 1000 // 5 minutes
 const MAX_BUFFER = 10 * 1024 * 1024 // 10 MB
@@ -30,6 +31,13 @@ export async function POST(request: Request) {
   }
 
   const user = auth.user!
+  if (user.workspace_id !== 1 || user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local Mission Control updates belong to the primary workspace only' }, { status: 403 })
+  }
+  const policy = getManagedReleasePolicy()
+  if (policy.managedRelease) {
+    return NextResponse.json({ error: policy.managedUpdateReason, ...policy }, { status: 409 })
+  }
   const cwd = process.cwd()
   const steps: { step: string; output: string }[] = []
 

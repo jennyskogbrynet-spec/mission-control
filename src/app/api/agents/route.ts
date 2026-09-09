@@ -1,3 +1,4 @@
+import { getAgentCommandSession } from '@/lib/agent-delivery'
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase, Agent, db_helpers } from '@/lib/db';
 import { eventBus } from '@/lib/event-bus';
@@ -60,6 +61,7 @@ export async function GET(request: NextRequest) {
     // Parse JSON config field
     const agentsWithParsedData = agents.map(agent => ({
       ...agent,
+      command_session_key: getAgentCommandSession(agent, workspaceId),
       config: enrichAgentConfigFromWorkspace(agent.config ? JSON.parse(agent.config) : {})
     }));
     

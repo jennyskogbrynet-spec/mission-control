@@ -4,7 +4,7 @@ import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { useMissionControl, type ExecApprovalRequest } from '@/store'
-import { useWebSocket } from '@/lib/websocket'
+import { resolveExecutionApproval } from '@/lib/exec-approval-client'
 import { matchesGlobPattern } from '@/lib/exec-approval-utils'
 
 type FilterTab = 'all' | 'pending' | 'resolved'
@@ -38,10 +38,31 @@ function timeAgo(timestamp: number): string {
 
 export function ExecApprovalPanel() {
   const t = useTranslations('execApproval')
-  const { execApprovals, updateExecApproval } = useMissionControl()
-  const { sendMessage } = useWebSocket()
+  const { execApprovals, updateExecApproval, addExecApproval } = useMissionControl()
   const [filter, setFilter] = useState<FilterTab>('pending')
   const [view, setView] = useState<PanelView>('approvals')
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [decisionError, setDecisionError] = useState<string | null>(null)
+  const [queueError, setQueueError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const response = await fetch('/api/exec-approvals')
+        const data = await response.json()
+        if (!response.ok || !Array.isArray(data.approvals)) throw new Error(data.error || 'Approval queue unavailable')
+        if (cancelled) return
+        for (const approval of data.approvals) addExecApproval(approval)
+        setQueueError(null)
+      } catch (error) {
+        if (!cancelled) setQueueError(error instanceof Error ? error.message : 'Approval queue unavailable')
+      }
+    }
+    void load()
+    const timer = setInterval(load, 30000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [addExecApproval])
 
   const pendingCount = execApprovals.filter(a => a.status === 'pending').length
 
@@ -62,29 +83,23 @@ export function ExecApprovalPanel() {
     })
   }, [execApprovals, filter, now])
 
-  const handleAction = (id: string, decision: 'allow-once' | 'allow-always' | 'deny') => {
-    const sent = sendMessage({
-      type: 'req',
-      method: 'exec.approval.resolve',
-      id: `ea-${Date.now()}`,
-      params: { id, decision },
-    })
-
-    if (!sent) {
-      const action = decision === 'deny' ? 'deny' : decision === 'allow-always' ? 'always_allow' : 'approve'
-      fetch('/api/exec-approvals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, action }),
-      }).catch(() => {})
+  const handleAction = async (id: string, decision: 'allow-once' | 'allow-always' | 'deny') => {
+    if (busyId) return
+    setBusyId(id)
+    setDecisionError(null)
+    try {
+      await resolveExecutionApproval(id, decision)
+      updateExecApproval(id, { status: decision === 'deny' ? 'denied' : 'approved' })
+    } catch (error) {
+      setDecisionError(error instanceof Error ? error.message : 'Failed to reach gateway')
+    } finally {
+      setBusyId(null)
     }
-
-    const newStatus = decision === 'deny' ? 'denied' : 'approved'
-    updateExecApproval(id, { status: newStatus as ExecApprovalRequest['status'] })
   }
 
   return (
     <div className="m-4">
+      {(decisionError || queueError) && <div role="alert" className="mb-3 text-sm text-red-400">{decisionError || queueError}</div>}
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
@@ -157,6 +172,7 @@ export function ExecApprovalPanel() {
                   key={approval.id}
                   approval={approval}
                   onAction={handleAction}
+                  busy={busyId !== null}
                 />
               ))}
             </div>
@@ -438,7 +454,9 @@ function AgentAllowlistCard({
 function ApprovalCard({
   approval,
   onAction,
+  busy = false,
 }: {
+  busy?: boolean
   approval: ExecApprovalRequest
   onAction: (id: string, decision: 'allow-once' | 'allow-always' | 'deny') => void
 }) {
@@ -500,6 +518,7 @@ function ApprovalCard({
             <Button
               size="sm"
               className="bg-green-600 hover:bg-green-700 text-white"
+              disabled={busy}
               onClick={() => onAction(approval.id, 'allow-once')}
             >
               {t('allowOnce')}
@@ -507,6 +526,7 @@ function ApprovalCard({
             <Button
               variant="outline"
               size="sm"
+              disabled={busy}
               onClick={() => onAction(approval.id, 'allow-always')}
             >
               {t('alwaysAllow')}
@@ -514,6 +534,7 @@ function ApprovalCard({
             <Button
               size="sm"
               className="bg-red-600 hover:bg-red-700 text-white"
+              disabled={busy}
               onClick={() => onAction(approval.id, 'deny')}
             >
               {t('deny')}

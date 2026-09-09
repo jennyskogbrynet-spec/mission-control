@@ -29,6 +29,7 @@ export type EventType =
   | 'agent.status_changed'
   | 'audit.security'
   | 'backup.stale'
+  | 'scheduler.budget_exhausted'
   | 'security.event'
   | 'connection.created'
   | 'connection.disconnected'

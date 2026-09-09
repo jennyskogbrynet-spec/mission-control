@@ -1,0 +1,336 @@
+[
+  {
+    "path": "status",
+    "status": 200,
+    "durationMs": 102,
+    "keys": [
+      "timestamp",
+      "uptime",
+      "memory",
+      "disk",
+      "sessions",
+      "processes"
+    ],
+    "counts": {
+      "processes": 2
+    },
+    "flags": {}
+  },
+  {
+    "path": "channels",
+    "status": 200,
+    "durationMs": 5210,
+    "keys": [
+      "channels",
+      "channelAccounts",
+      "channelOrder",
+      "channelLabels",
+      "connected",
+      "updatedAt"
+    ],
+    "counts": {
+      "channelOrder": 1
+    },
+    "flags": {
+      "connected": true
+    }
+  },
+  {
+    "path": "skills",
+    "status": 200,
+    "durationMs": 10,
+    "keys": [
+      "skills",
+      "groups",
+      "total"
+    ],
+    "counts": {
+      "skills": 207,
+      "groups": 6
+    },
+    "flags": {}
+  },
+  {
+    "path": "memory?action=tree&depth=1",
+    "status": 200,
+    "durationMs": 420,
+    "keys": [
+      "tree"
+    ],
+    "counts": {
+      "tree": 1
+    },
+    "flags": {}
+  },
+  {
+    "path": "activities?limit=5",
+    "status": 200,
+    "durationMs": 83,
+    "keys": [
+      "activities",
+      "total",
+      "hasMore"
+    ],
+    "counts": {
+      "activities": 5
+    },
+    "flags": {
+      "hasMore": true
+    }
+  },
+  {
+    "path": "logs?action=recent&limit=5",
+    "status": 200,
+    "durationMs": 284,
+    "keys": [
+      "logs"
+    ],
+    "counts": {
+      "logs": 5
+    },
+    "flags": {}
+  },
+  {
+    "path": "nodes?action=list",
+    "status": 200,
+    "durationMs": 12192,
+    "keys": [
+      "nodes",
+      "connected"
+    ],
+    "counts": {
+      "nodes": 0
+    },
+    "flags": {
+      "connected": true
+    }
+  },
+  {
+    "path": "exec-approvals",
+    "status": 200,
+    "durationMs": 22,
+    "keys": [
+      "approvals"
+    ],
+    "counts": {
+      "approvals": 0
+    },
+    "flags": {}
+  },
+  {
+    "path": "system-monitor",
+    "status": 200,
+    "durationMs": 462,
+    "keys": [
+      "timestamp",
+      "cpu",
+      "memory",
+      "disk",
+      "gpu",
+      "network",
+      "processes"
+    ],
+    "counts": {
+      "disk": 1,
+      "network": 24,
+      "processes": 8
+    },
+    "flags": {}
+  },
+  {
+    "path": "cron?action=list",
+    "status": 200,
+    "durationMs": 6,
+    "keys": [
+      "jobs"
+    ],
+    "counts": {
+      "jobs": 0
+    },
+    "flags": {}
+  },
+  {
+    "path": "webhooks",
+    "status": 200,
+    "durationMs": 13,
+    "keys": [
+      "webhooks"
+    ],
+    "counts": {
+      "webhooks": 0
+    },
+    "flags": {}
+  },
+  {
+    "path": "alerts",
+    "status": 200,
+    "durationMs": 49,
+    "keys": [
+      "rules"
+    ],
+    "counts": {
+      "rules": 0
+    },
+    "flags": {}
+  },
+  {
+    "path": "github?action=status",
+    "status": 400
+  },
+  {
+    "path": "security-audit",
+    "status": 200,
+    "durationMs": 829,
+    "keys": [
+      "posture",
+      "scan",
+      "authEvents",
+      "agentTrust",
+      "secretExposures",
+      "mcpAudit",
+      "rateLimits",
+      "injectionAttempts",
+      "timeline"
+    ],
+    "counts": {
+      "timeline": 25
+    },
+    "flags": {}
+  },
+  {
+    "path": "auth/users",
+    "status": 200,
+    "durationMs": 10,
+    "keys": [
+      "users"
+    ],
+    "counts": {
+      "users": 1
+    },
+    "flags": {}
+  },
+  {
+    "path": "audit?limit=5",
+    "status": 200,
+    "durationMs": 17,
+    "keys": [
+      "events",
+      "total",
+      "limit",
+      "offset"
+    ],
+    "counts": {
+      "events": 5
+    },
+    "flags": {}
+  },
+  {
+    "path": "gateways",
+    "status": 200,
+    "durationMs": 12,
+    "keys": [
+      "gateways"
+    ],
+    "counts": {
+      "gateways": 1
+    },
+    "flags": {}
+  },
+  {
+    "path": "integrations",
+    "status": 200,
+    "durationMs": 60,
+    "keys": [
+      "integrations",
+      "categories",
+      "opAvailable",
+      "envPath"
+    ],
+    "counts": {
+      "integrations": 16,
+      "categories": 9
+    },
+    "flags": {
+      "opAvailable": false
+    }
+  },
+  {
+    "path": "debug?action=status",
+    "status": 200,
+    "durationMs": 26,
+    "keys": [
+      "ok",
+      "status",
+      "gatewayReachable",
+      "probedPath"
+    ],
+    "counts": {},
+    "flags": {
+      "ok": true,
+      "gatewayReachable": true
+    }
+  },
+  {
+    "path": "settings",
+    "status": 200,
+    "durationMs": 10,
+    "keys": [
+      "settings",
+      "grouped"
+    ],
+    "counts": {
+      "settings": 26
+    },
+    "flags": {}
+  },
+  {
+    "path": "tokens?action=stats&timeframe=day",
+    "status": 200,
+    "durationMs": 17,
+    "keys": [
+      "summary",
+      "models",
+      "sessions",
+      "agents",
+      "timeframe",
+      "recordCount"
+    ],
+    "counts": {},
+    "flags": {},
+    "metrics": {
+      "totalTokens": 1664574,
+      "totalCost": 5.723693999999999,
+      "requestCount": 59,
+      "avgTokensPerRequest": 28213,
+      "avgCostPerRequest": 0.09701176271186439
+    },
+    "modelCounts": 7
+  },
+  {
+    "path": "tokens?action=task-costs&timeframe=day",
+    "status": 200,
+    "durationMs": 46,
+    "keys": [
+      "summary",
+      "tasks",
+      "agents",
+      "projects",
+      "unattributed",
+      "timeframe",
+      "recordCount",
+      "attributedRecordCount"
+    ],
+    "counts": {
+      "tasks": 0
+    },
+    "flags": {},
+    "metrics": {
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requestCount": 0,
+      "avgTokensPerRequest": 0,
+      "avgCostPerRequest": 0
+    },
+    "modelCounts": 0
+  }
+]

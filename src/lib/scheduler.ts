@@ -10,7 +10,7 @@ import { pruneGatewaySessionsOlderThan, getAgentLiveStatuses } from './sessions'
 import { eventBus } from './event-bus'
 import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
-import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
+import { dispatchAssignedTasks, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
@@ -400,14 +400,13 @@ export function initScheduler() {
     running: false,
   })
 
-  tasks.set('aegis_review', {
-    name: 'Aegis Quality Review',
-    intervalMs: TICK_MS, // Every 60s — check for tasks awaiting review
-    lastRun: null,
-    nextRun: now + 30_000, // First check 30s after startup (after dispatch)
-    enabled: true,
-    running: false,
-  })
+  // NOTE: the automated 'aegis_review' scheduled task was removed 2026-07-31.
+  // It re-sent a full review prompt to a gateway agent every 60s per task in
+  // 'review' status, with no bound on retries and no global spend ceiling. When
+  // the reviewer path broke it burned ~1.14B input tokens over two days. Tasks
+  // now stay in 'review' for human triage. Do not reintroduce an automated
+  // agent-invoking scheduler task without a bounded retry AND a budget guard
+  // (see assertAgentInvocationBudget in task-dispatch.ts).
 
   tasks.set('recurring_task_spawn', {
     name: 'Recurring Task Spawn',
@@ -459,11 +458,10 @@ async function tick() {
       : id === 'local_agent_sync' ? 'general.local_agent_sync'
       : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
       : id === 'task_dispatch' ? 'general.task_dispatch'
-      : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
@@ -483,7 +481,6 @@ async function tick() {
             const parts = [routeResult.message, dispatchResult.message].filter(m => m && !m.includes('No '))
             return { ok: routeResult.ok && dispatchResult.ok, message: parts.join(' | ') || 'No tasks to route or dispatch' }
           })
-        : id === 'aegis_review' ? await runAegisReviews()
         : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
         : id === 'stale_task_requeue' ? await requeueStaleTasks()
         : await runCleanup()
@@ -519,11 +516,10 @@ export function getSchedulerStatus() {
       : id === 'local_agent_sync' ? 'general.local_agent_sync'
       : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
       : id === 'task_dispatch' ? 'general.task_dispatch'
-      : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,
@@ -549,7 +545,7 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
   if (taskId === 'local_agent_sync') return syncLocalAgents()
   if (taskId === 'gateway_agent_sync') return syncAgentsFromConfig('manual').then(r => ({ ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total` }))
   if (taskId === 'task_dispatch') return autoRouteInboxTasks().then(async (r) => { const d = await dispatchAssignedTasks(); return { ok: r.ok && d.ok, message: [r.message, d.message].filter(m => m && !m.includes('No ')).join(' | ') || 'No tasks' } })
-  if (taskId === 'aegis_review') return runAegisReviews()
+  if (taskId === 'aegis_review') return { ok: false, message: 'Aegis auto-review was removed 2026-07-31 (unbounded retry loop drained the codex quota). Review tasks manually.' }
   if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
   if (taskId === 'stale_task_requeue') return requeueStaleTasks()
   return { ok: false, message: `Unknown task: ${taskId}` }

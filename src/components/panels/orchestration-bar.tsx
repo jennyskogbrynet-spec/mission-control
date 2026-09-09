@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { PipelineTab } from './pipeline-tab'
@@ -11,6 +11,7 @@ interface Agent {
   role: string
   status: string
   session_key?: string
+  command_session_key?: string | null
 }
 
 interface WorkflowTemplate {
@@ -51,6 +52,7 @@ export function OrchestrationBar() {
   const [selectedAgent, setSelectedAgent] = useState('')
   const [message, setMessage] = useState('')
   const [sending, setSending] = useState(false)
+  const commandKey = useRef<{ signature: string; key: string } | null>(null)
   const [commandResult, setCommandResult] = useState<{ ok: boolean; text: string } | null>(null)
 
   // Template state
@@ -86,16 +88,19 @@ export function OrchestrationBar() {
     if (!selectedAgent || !message.trim()) return
     setSending(true)
     setCommandResult(null)
+    const signature = JSON.stringify([selectedAgent, message])
+    if (commandKey.current?.signature !== signature) commandKey.current = { signature, key: crypto.randomUUID() }
 
     try {
       const res = await fetch('/api/agents/message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: selectedAgent, content: message, from: 'operator' })
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': commandKey.current.key },
+        body: JSON.stringify({ to: selectedAgent, message })
       })
       const data = await res.json()
-      if (res.ok) {
-        setCommandResult({ ok: true, text: `Message sent to ${selectedAgent}` })
+      if (res.ok && data.status === 'accepted') {
+        setCommandResult({ ok: true, text: `Gateway accepted the command for ${selectedAgent}. Follow the session for the result.` })
+        commandKey.current = null
         setMessage('')
       } else {
         setCommandResult({ ok: false, text: data.error || 'Failed to send' })
@@ -272,8 +277,8 @@ export function OrchestrationBar() {
                 <option value="" disabled>{t('noAgentsRegistered')}</option>
               )}
               {agents.map(a => (
-                <option key={a.name} value={a.name} disabled={!a.session_key} title={!a.session_key ? 'Agent has no active session' : undefined}>
-                  {a.name} ({a.status}){!a.session_key ? ` — ${t('noSessionSuffix')}` : ''}
+                <option key={a.name} value={a.name} disabled={!(a.command_session_key || a.session_key)} title={!(a.command_session_key || a.session_key) ? 'Agent has no active session' : undefined}>
+                  {a.name} ({a.status}){!(a.command_session_key || a.session_key) ? ` — ${t('noSessionSuffix')}` : ''}
                 </option>
               ))}
             </select>

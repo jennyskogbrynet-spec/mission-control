@@ -29,7 +29,7 @@ describe('getCronOccurrences', () => {
     expect(rows).toHaveLength(6)
   })
 
-  it('ignores OpenClaw timezone suffix in display schedule', () => {
+  it('supports OpenClaw timezone suffix in display schedule', () => {
     const start = new Date(2026, 2, 1, 0, 0, 0, 0).getTime()
     const end = new Date(2026, 2, 2, 0, 0, 0, 0).getTime()
     const rows = getCronOccurrences('0 6 * * * (UTC)', start, end)
@@ -41,4 +41,26 @@ describe('getCronOccurrences', () => {
     const end = new Date(2026, 2, 2, 0, 0, 0, 0).getTime()
     expect(getCronOccurrences('invalid', start, end)).toEqual([])
   })
+})
+
+describe('calendar timezone and enabled state', () => {
+  it('respects timezone rather than interpreting UTC in browser local time', () => {
+    const rows = getCronOccurrences('0 6 * * * (UTC)', Date.parse('2026-09-08T00:00:00Z'), Date.parse('2026-09-09T00:00:00Z'))
+    expect(rows.map(row => new Date(row.atMs).toISOString())).toEqual(['2026-09-08T06:00:00.000Z'])
+  })
+  it('uses Sunday alias 7', () => {
+    expect(getCronOccurrences('0 12 * * 7 (UTC)', Date.parse('2026-09-06T00:00:00Z'), Date.parse('2026-09-07T00:00:00Z'))).toHaveLength(1)
+  })
+})
+
+
+it('keeps UTC wall-clock schedules through browser daylight-saving transitions', () => {
+  const rows = getCronOccurrences('30 2 * * * (UTC)', Date.parse('2026-03-29T00:00:00Z'), Date.parse('2026-03-30T00:00:00Z'))
+  expect(rows.map(row => new Date(row.atMs).toISOString())).toEqual(['2026-03-29T02:30:00.000Z'])
+})
+
+
+it('expands a step beginning at a numeric start', () => {
+  const rows = getCronOccurrences('5/15 * * * * (UTC)', Date.parse('2026-09-08T00:00:00Z'), Date.parse('2026-09-08T01:00:00Z'))
+  expect(rows.map(row => new Date(row.atMs).getUTCMinutes())).toEqual([5, 20, 35, 50])
 })

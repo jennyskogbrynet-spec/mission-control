@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { useMissionControl } from '@/store'
 import { createClientLogger } from '@/lib/client-logger'
+import { getLowestRecordedUnitCost, describeUsageCost, getKnownCostShare, formatPriceCoverage, type CostCoverage, formatUsageCost as formatCost } from '@/lib/cost-insights'
 import {
   PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, BarChart, Bar,
@@ -15,14 +16,21 @@ const log = createClientLogger('CostTracker')
 
 // ── Types ──────────────────────────────────────────
 
-interface TokenStats {
+interface TokenStats extends CostCoverage {
   totalTokens: number; totalCost: number; requestCount: number
   avgTokensPerRequest: number; avgCostPerRequest: number
 }
 
+interface UsageCoverage {
+  sourceRecords: { database: number; manual: number; sessionSnapshots: number }
+  billedCost: number; estimatedCost: number; excludedReportedRecords: number
+  pricedTokenPercent: number | null; unknownCostTokens: number; excludedSnapshots: number; unavailableSources: string[]; unattributedTokens: number
+}
+
 interface UsageStats {
+  coverage?: UsageCoverage
   summary: TokenStats
-  models: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>
+  models: Record<string, TokenStats>
   sessions: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>
   timeframe: string
   recordCount: number
@@ -34,10 +42,12 @@ interface TrendData {
 }
 
 interface ByAgentModelBreakdown {
+  pricing?: CostCoverage
   model: string; input_tokens: number; output_tokens: number; request_count: number; cost: number
 }
 
 interface ByAgentEntry {
+  pricing?: CostCoverage
   agent: string; total_input_tokens: number; total_output_tokens: number
   total_tokens: number; total_cost: number; session_count: number
   request_count: number; last_active: string; models: ByAgentModelBreakdown[]
@@ -45,7 +55,7 @@ interface ByAgentEntry {
 
 interface ByAgentResponse {
   agents: ByAgentEntry[]
-  summary: { total_cost: number; total_tokens: number; agent_count: number; days: number }
+  summary: { pricing?: CostCoverage; total_cost: number; total_tokens: number; agent_count: number; days: number }
 }
 
 interface TaskCostEntry {
@@ -64,7 +74,7 @@ interface TaskCostsResponse {
   timeframe: string
 }
 
-interface SessionCostEntry {
+interface SessionCostEntry extends CostCoverage {
   sessionId: string; sessionKey?: string; model: string
   totalTokens: number; inputTokens: number; outputTokens: number
   totalCost: number; requestCount: number; firstSeen: string; lastSeen: string
@@ -80,7 +90,6 @@ const formatNumber = (num: number) => {
   return num.toString()
 }
 
-const formatCost = (cost: number) => '$' + cost.toFixed(4)
 
 const getModelDisplayName = (name: string) => name.split('/').pop() || name
 
@@ -97,6 +106,7 @@ export function CostTrackerPanel() {
   const [timeframe, setTimeframe] = useState<Timeframe>('day')
   const [chartMode, setChartMode] = useState<'incremental' | 'cumulative'>('incremental')
   const [isLoading, setIsLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
 
   // Data
@@ -110,28 +120,28 @@ export function CostTrackerPanel() {
 
   const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const timeframeToDays = (tf: Timeframe): number => {
-    switch (tf) { case 'hour': case 'day': return 1; case 'week': return 7; case 'month': return 30 }
-  }
-
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [statsRes, trendRes, byAgentRes, taskRes] = await Promise.all([
+      const [statsRes, trendRes, taskRes] = await Promise.all([
         fetch(`/api/tokens?action=stats&timeframe=${timeframe}`),
         fetch(`/api/tokens?action=trends&timeframe=${timeframe}`),
-        fetch(`/api/tokens/by-agent?days=${timeframeToDays(timeframe)}`),
         fetch(`/api/tokens?action=task-costs&timeframe=${timeframe}`),
       ])
-      const [statsJson, trendJson, byAgentJson, taskJson] = await Promise.all([
-        statsRes.json(), trendRes.json(), byAgentRes.json(), taskRes.json(),
+      const [statsJson, trendJson, taskJson] = await Promise.all([
+        statsRes.json(), trendRes.json(), taskRes.json(),
       ])
+      if (!statsRes.ok) throw new Error(statsJson.error || 'Cost report unavailable')
+      if (!trendRes.ok) throw new Error(trendJson.error || 'Cost trends unavailable')
+      if (!taskRes.ok) throw new Error(taskJson.error || 'Task attribution unavailable')
+      setLoadError(null)
       setUsageStats(statsJson)
       setTrendData(trendJson)
-      setByAgentData(byAgentJson)
+      setByAgentData(statsJson.agentBreakdown || null)
       setTaskData(taskJson)
     } catch (err) {
       log.error('Failed to load cost data:', err)
+      setLoadError(err instanceof Error ? err.message : 'Cost report unavailable')
     } finally {
       setIsLoading(false)
     }
@@ -141,32 +151,19 @@ export function CostTrackerPanel() {
     try {
       const res = await fetch(`/api/tokens?action=session-costs&timeframe=${timeframe}`)
       const data = await res.json()
-      if (Array.isArray(data?.sessions)) {
-        setSessionCosts(data.sessions)
-      } else if (usageStats?.sessions) {
-        setSessionCosts(Object.entries(usageStats.sessions).map(([id, stats]) => ({
-          sessionId: id, model: '', totalTokens: stats.totalTokens, inputTokens: 0,
-          outputTokens: 0, totalCost: stats.totalCost, requestCount: stats.requestCount,
-          firstSeen: '', lastSeen: '',
-        })))
-      }
-    } catch {
-      if (usageStats?.sessions) {
-        setSessionCosts(Object.entries(usageStats.sessions).map(([id, stats]) => ({
-          sessionId: id, model: '', totalTokens: stats.totalTokens, inputTokens: 0,
-          outputTokens: 0, totalCost: stats.totalCost, requestCount: stats.requestCount,
-          firstSeen: '', lastSeen: '',
-        })))
-      }
+      if (!res.ok || !Array.isArray(data?.sessions)) throw new Error(data.error || 'Session cost report unavailable')
+      setSessionCosts(data.sessions)
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Session cost report unavailable')
     }
-  }, [timeframe, usageStats])
+  }, [timeframe])
 
   useEffect(() => { loadData() }, [loadData])
   useEffect(() => {
     refreshTimer.current = setInterval(loadData, 30_000)
     return () => { if (refreshTimer.current) clearInterval(refreshTimer.current) }
   }, [loadData])
-  useEffect(() => { if (view === 'sessions') loadSessionCosts() }, [view, loadSessionCosts])
+  useEffect(() => { if (view === 'sessions') loadSessionCosts() }, [view, loadSessionCosts, usageStats])
 
   const exportData = async (format: 'json' | 'csv') => {
     setIsExporting(true)
@@ -191,7 +188,7 @@ export function CostTrackerPanel() {
   const summary = usageStats?.summary
   const agentSummary = byAgentData?.summary
   const agentList = byAgentData?.agents || []
-  const maxAgentCost = Math.max(...agentList.map(a => a.total_cost), 0.0001)
+  const maxAgentCost = Math.max(...agentList.map(a => a.total_cost), 0)
 
   const getAgentTasks = (agentName: string): TaskCostEntry[] => {
     if (!taskData) return []
@@ -236,6 +233,16 @@ export function CostTrackerPanel() {
         </div>
       </div>
 
+      {loadError && <div role="alert" className="text-sm text-red-400">{loadError}</div>}
+      {usageStats?.coverage && <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground space-y-1">
+        <div>Shared usage data: {usageStats.coverage.sourceRecords.database + usageStats.coverage.sourceRecords.manual} reported usage records + {usageStats.coverage.sourceRecords.sessionSnapshots} session snapshots without identified overlaps. Overview and agents use the same data.</div>
+        <div>Reported cost: {formatCost(usageStats.coverage.billedCost)}. Catalogue estimate: {formatCost(usageStats.coverage.estimatedCost)}; Claude and Grok base prices verified 2026-09-08; other provider estimates were not reverified. Excludes cache pricing, tools and special pricing modifiers.</div>
+        <div>Price coverage: {formatPriceCoverage(usageStats.coverage.pricedTokenPercent)} of tokens. {formatNumber(usageStats.coverage.unknownCostTokens)} tokens have unknown cost; their dollars are excluded.</div>
+        {usageStats.coverage.excludedSnapshots > 0 && <div>{usageStats.coverage.excludedSnapshots} overlapping or ambiguous snapshots excluded to avoid double counting.</div>}
+        {usageStats.coverage.excludedReportedRecords > 0 && <div>{usageStats.coverage.excludedReportedRecords} duplicate or overlapping reported records excluded.</div>}
+        {usageStats.coverage.unattributedTokens > 0 && <div>{formatNumber(usageStats.coverage.unattributedTokens)} tokens remain in the unattributed agent bucket.</div>}
+        {usageStats.coverage.unavailableSources.length > 0 && <div role="alert" className="text-amber-400">Unavailable sources: {usageStats.coverage.unavailableSources.join(', ')}. Totals are incomplete.</div>}
+      </div>}
       {isLoading && !usageStats ? (
         <Loader variant="panel" label={t('loadingCostData')} />
       ) : view === 'overview' ? (
@@ -290,15 +297,15 @@ function OverviewView({
   }
 
   const modelData = Object.entries(stats.models)
-    .map(([model, s]) => ({ name: getModelDisplayName(model), fullName: model, tokens: s.totalTokens, cost: s.totalCost, requests: s.requestCount }))
+    .map(([model, s]) => ({ name: getModelDisplayName(model), fullName: model, tokens: s.totalTokens, cost: s.totalCost, requests: s.requestCount, costInfo: describeUsageCost(s) }))
     .sort((a, b) => b.cost - a.cost)
 
-  const pieData = modelData.slice(0, 6).map(m => ({ name: m.name, value: m.cost }))
+  const pieData = modelData.filter(m => m.costInfo.hasKnownCost).slice(0, 6).map(m => ({ name: m.name, value: m.cost }))
 
   const trendChartData = (() => {
     if (!trendData?.trends) return []
     const raw = trendData.trends.map(t => ({
-      time: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      time: new Date(t.timestamp).toLocaleString([], { ...(timeframe === 'week' || timeframe === 'month' ? { month: 'short', day: 'numeric' } : {}), hour: '2-digit', minute: '2-digit' }),
       tokens: t.tokens, cost: t.cost, requests: t.requests,
     }))
     if (chartMode === 'cumulative') {
@@ -310,22 +317,18 @@ function OverviewView({
 
   // Performance metrics
   const models = Object.entries(stats.models)
-  const mostEfficient = models.length > 0
-    ? models.reduce((best, curr) => {
-        const c = curr[1].totalCost / Math.max(1, curr[1].totalTokens)
-        const b = best[1].totalCost / Math.max(1, best[1].totalTokens)
-        return c < b ? curr : best
-      })
-    : null
-  const efficientCostPerToken = mostEfficient ? mostEfficient[1].totalCost / Math.max(1, mostEfficient[1].totalTokens) : 0
-  const potentialSavings = Math.max(0, stats.summary.totalCost - stats.summary.totalTokens * efficientCostPerToken)
+  const mostEfficient = getLowestRecordedUnitCost(stats.models)
+  const efficientCostPerToken = mostEfficient?.costPerToken ?? 0
+  const taskRecordCount = (taskData?.summary.requestCount || 0) + (taskData?.unattributed.requestCount || 0)
+  const taskAttribution = taskData && taskRecordCount > 0 ? taskData.summary.requestCount / taskRecordCount * 100 : null
 
   return (
     <div className="space-y-6">
+      <p className="text-xs text-muted-foreground">Catalogue usage estimate, not an invoice. Unknown models are excluded from dollar totals. A subscription alone does not prove free API usage. Session snapshots are selected by last activity, not billed usage within the period.</p>
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{formatCost(stats.summary.totalCost)}</div>
+          <div className="text-3xl font-bold text-foreground">{describeUsageCost(stats.summary).label}</div>
           <div className="text-sm text-muted-foreground">{t('totalCost', { timeframe })}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -334,7 +337,7 @@ function OverviewView({
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
           <div className="text-3xl font-bold text-foreground">{formatNumber(stats.summary.requestCount)}</div>
-          <div className="text-sm text-muted-foreground">{t('apiRequests')}</div>
+          <div className="text-sm text-muted-foreground">Usage records</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
           <div className="text-3xl font-bold text-foreground">{agentSummary?.agent_count ?? '-'}</div>
@@ -342,9 +345,9 @@ function OverviewView({
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
           <div className="text-3xl font-bold text-foreground">
-            {taskData ? `${((1 - taskData.unattributed.totalCost / Math.max(stats.summary.totalCost, 0.0001)) * 100).toFixed(0)}%` : '-'}
+            {taskAttribution != null ? `${taskAttribution.toFixed(0)}%` : taskData ? 'No usage' : '-'}
           </div>
-          <div className="text-sm text-muted-foreground">{t('taskAttributed')}</div>
+          <div className="text-sm text-muted-foreground">Task-attributed records</div>
         </div>
       </div>
 
@@ -372,7 +375,7 @@ function OverviewView({
                   <XAxis dataKey="time" /><YAxis />
                   <Tooltip /><Legend />
                   <Line type="monotone" dataKey="tokens" stroke="#8884d8" strokeWidth={2} name="Tokens" />
-                  <Line type="monotone" dataKey="requests" stroke="#82ca9d" strokeWidth={2} name="Requests" />
+                  <Line type="monotone" dataKey="requests" stroke="#82ca9d" strokeWidth={2} name="Usage records" />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -424,34 +427,35 @@ function OverviewView({
           <h2 className="text-xl font-semibold mb-4">{t('performanceInsights')}</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div className="bg-secondary rounded-lg p-4">
-              <div className="text-xs text-muted-foreground mb-1">{t('mostEfficientModel')}</div>
-              <div className="text-lg font-bold text-green-500">{mostEfficient ? getModelDisplayName(mostEfficient[0]) : '-'}</div>
-              {mostEfficient && <div className="text-xs text-muted-foreground">${(efficientCostPerToken * 1000).toFixed(4)}/1K tokens</div>}
+              <div className="text-xs text-muted-foreground mb-1">Lowest recorded unit cost</div>
+              <div className="text-lg font-bold text-green-500">{mostEfficient ? getModelDisplayName(mostEfficient.model) : '-'}</div>
+              {!mostEfficient && <div className="text-xs text-muted-foreground">No positive, attributed model cost to compare.</div>}
+              {mostEfficient && <div className="text-xs text-muted-foreground">{formatCost(efficientCostPerToken * 1000)}/1K priced tokens</div>}
             </div>
             <div className="bg-secondary rounded-lg p-4">
               <div className="text-xs text-muted-foreground mb-1">{t('avgTokensPerRequest')}</div>
               <div className="text-lg font-bold text-foreground">{formatNumber(stats.summary.avgTokensPerRequest)}</div>
             </div>
             <div className="bg-secondary rounded-lg p-4">
-              <div className="text-xs text-muted-foreground mb-1">{t('optimizationPotential')}</div>
-              <div className="text-lg font-bold text-orange-500">{formatCost(potentialSavings)}</div>
-              <div className="text-xs text-muted-foreground">{stats.summary.totalCost > 0 ? ((potentialSavings / stats.summary.totalCost) * 100).toFixed(1) : '0'}% {t('savingsPossible')}</div>
+              <div className="text-xs text-muted-foreground mb-1">Savings forecast</div>
+              <div className="text-lg font-bold text-orange-500">Not available</div>
+              <div className="text-xs text-muted-foreground">Token counts do not measure task quality or comparable billing.</div>
             </div>
           </div>
           {/* Model efficiency bars */}
           <div className="space-y-2">
             {modelData.map(m => {
-              const costPer1k = m.cost / Math.max(1, m.tokens) * 1000
-              const maxCostPer1k = Math.max(...modelData.map(d => d.cost / Math.max(1, d.tokens) * 1000), 0.0001)
+              const costPer1k = m.costInfo.costPerThousand
+              const maxCostPer1k = Math.max(...modelData.map(d => d.costInfo.costPerThousand ?? 0), 0)
               return (
                 <div key={m.fullName} className="flex items-center text-sm">
                   <div className="w-32 truncate text-muted-foreground">{m.name}</div>
                   <div className="flex-1 mx-3">
                     <div className="w-full bg-secondary rounded-full h-2">
-                      <div className="bg-green-500 h-2 rounded-full" style={{ width: `${(costPer1k / maxCostPer1k) * 100}%` }} />
+                      <div className="bg-green-500 h-2 rounded-full" style={{ width: `${costPer1k != null && maxCostPer1k > 0 ? costPer1k / maxCostPer1k * 100 : 0}%` }} />
                     </div>
                   </div>
-                  <div className="w-20 text-right text-xs text-muted-foreground">${costPer1k.toFixed(4)}/1K</div>
+                  <div className="w-36 text-right text-xs text-muted-foreground">{costPer1k == null ? 'Unknown' : `${formatCost(costPer1k)}/1K${m.costInfo.partial ? ' priced (partial)' : ''}`}</div>
                 </div>
               )
             })}
@@ -499,6 +503,7 @@ function AgentsView({
     )
   }
 
+  const summaryCost = describeUsageCost({ totalTokens: summary.total_tokens, totalCost: summary.total_cost, ...summary.pricing })
   return (
     <div className="space-y-6">
       {/* Summary row */}
@@ -508,7 +513,7 @@ function AgentsView({
           <div className="text-sm text-muted-foreground">{t('agents')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{formatCost(summary.total_cost)}</div>
+          <div className="text-3xl font-bold text-foreground">{summaryCost.label}</div>
           <div className="text-sm text-muted-foreground">{t('totalCostDays', { days: summary.days })}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -517,9 +522,9 @@ function AgentsView({
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
           <div className="text-3xl font-bold text-foreground">
-            {summary.total_tokens > 0 ? `$${(summary.total_cost / summary.total_tokens * 1000).toFixed(4)}` : '-'}
+            {summaryCost.costPerThousand == null ? 'Unknown' : formatCost(summaryCost.costPerThousand)}
           </div>
-          <div className="text-sm text-muted-foreground">{t('avgPer1kTokens')}</div>
+          <div className="text-sm text-muted-foreground">Avg per 1K priced tokens{summaryCost.partial ? ' (partial)' : ''}</div>
         </div>
       </div>
 
@@ -528,9 +533,9 @@ function AgentsView({
         <h2 className="text-xl font-semibold mb-4">{t('perAgentCost')}</h2>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={agents.slice(0, 12).map(a => ({
+            <BarChart data={agents.filter(a => describeUsageCost({ totalTokens: a.total_tokens, totalCost: a.total_cost, ...a.pricing }).hasKnownCost).slice(0, 12).map(a => ({
               name: a.agent.length > 12 ? a.agent.slice(0, 11) + '\u2026' : a.agent,
-              cost: Number(a.total_cost.toFixed(4)),
+              cost: a.total_cost,
             }))}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="name" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} />
@@ -546,7 +551,8 @@ function AgentsView({
         <h2 className="text-xl font-semibold mb-4">{t('agentBreakdown')}</h2>
         <div className="space-y-2 max-h-[600px] overflow-y-auto">
           {agents.map(agent => {
-            const costShare = (agent.total_cost / Math.max(summary.total_cost, 0.0001)) * 100
+            const costInfo = describeUsageCost({ totalTokens: agent.total_tokens, totalCost: agent.total_cost, ...agent.pricing })
+            const costShare = costInfo.hasKnownCost ? getKnownCostShare(agent.total_cost, summary.total_cost) : null
             const isExpanded = expandedAgent === agent.agent
             const agentTasks = getAgentTasks(agent.agent)
             return (
@@ -559,7 +565,7 @@ function AgentsView({
                       {agent.session_count} session{agent.session_count !== 1 ? 's' : ''}
                     </span>
                     <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 shrink-0">
-                      {agent.request_count} req{agent.request_count !== 1 ? 's' : ''}
+                      {agent.request_count} record{agent.request_count !== 1 ? 's' : ''}
                     </span>
                     {agentTasks.length > 0 && (
                       <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-500 shrink-0">
@@ -570,12 +576,12 @@ function AgentsView({
                   <div className="flex items-center gap-4 text-sm shrink-0">
                     <div className="w-24 hidden md:block">
                       <div className="w-full bg-secondary rounded-full h-2">
-                        <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${(agent.total_cost / maxCost) * 100}%` }} />
+                        <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${costInfo.hasKnownCost && maxCost > 0 ? agent.total_cost / maxCost * 100 : 0}%` }} />
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="font-medium text-foreground">{formatCost(agent.total_cost)}</div>
-                      <div className="text-xs text-muted-foreground">{costShare.toFixed(1)}%</div>
+                      <div className="font-medium text-foreground">{costInfo.label}</div>
+                      <div className="text-xs text-muted-foreground">{costShare == null ? '—' : `${costShare.toFixed(1)}% of known cost`}</div>
                     </div>
                     <div className="text-right">
                       <div className="text-muted-foreground">{formatNumber(agent.total_tokens)}</div>
@@ -620,7 +626,7 @@ function AgentsView({
                                   {task.project.ticketRef && <span className="text-muted-foreground font-mono">{task.project.ticketRef}</span>}
                                   <span className="text-foreground truncate">{task.title}</span>
                                 </div>
-                                <span className="font-medium text-foreground w-16 text-right shrink-0">{formatCost(task.stats.totalCost)}</span>
+                                <span className="font-medium text-foreground w-16 text-right shrink-0">{describeUsageCost(task.stats).label}</span>
                               </div>
                             ))}
                           </div>
@@ -637,7 +643,7 @@ function AgentsView({
                               <span>{formatNumber(m.input_tokens)} in</span>
                               <span>{formatNumber(m.output_tokens)} out</span>
                               <span>{m.request_count} reqs</span>
-                              <span className="font-medium text-foreground w-16 text-right">{formatCost(m.cost)}</span>
+                              <span className="font-medium text-foreground w-16 text-right">{describeUsageCost({ totalTokens: m.input_tokens + m.output_tokens, totalCost: m.cost, ...m.pricing }).label}</span>
                             </div>
                           </div>
                         ))}
@@ -681,7 +687,7 @@ function SessionsView({
         {(['cost', 'tokens', 'requests', 'recent'] as const).map(s => (
           <button key={s} onClick={() => setSessionSort(s)}
             className={`px-2 py-1 text-xs rounded ${sessionSort === s ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:text-foreground'}`}
-          >{s.charAt(0).toUpperCase() + s.slice(1)}</button>
+          >{s === 'requests' ? 'Records' : s.charAt(0).toUpperCase() + s.slice(1)}</button>
         ))}
       </div>
 
@@ -694,8 +700,9 @@ function SessionsView({
         <div className="space-y-2">
           {sorted.map(entry => {
             const sessionInfo = sessions.find((s: any) => s.id === entry.sessionId)
+            const costInfo = describeUsageCost(entry)
             return (
-              <div key={entry.sessionId} className="bg-card border border-border rounded-lg p-4">
+              <div key={entry.sessionId} role="group" aria-label={`Session ${entry.sessionId}`} className="bg-card border border-border rounded-lg p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="min-w-0">
                     <div className="font-medium text-foreground truncate">
@@ -709,15 +716,15 @@ function SessionsView({
                     </div>
                   </div>
                   <div className="text-right flex-shrink-0">
-                    <div className="text-lg font-bold text-foreground">{formatCost(entry.totalCost)}</div>
+                    <div className="text-lg font-bold text-foreground">{costInfo.label}</div>
                     <div className="text-xs text-muted-foreground">{formatNumber(entry.totalTokens)} tokens</div>
                   </div>
                 </div>
                 <div className="grid grid-cols-4 gap-4 text-xs text-muted-foreground border-t border-border/50 pt-2 mt-2">
-                  <div><span className="font-medium text-foreground">{entry.requestCount}</span> {t('requests')}</div>
+                  <div><span className="font-medium text-foreground">{entry.requestCount}</span> records</div>
                   <div><span className="font-medium text-foreground">{formatNumber(entry.inputTokens || 0)}</span> {t('inShort')}</div>
                   <div><span className="font-medium text-foreground">{formatNumber(entry.outputTokens || 0)}</span> {t('outShort')}</div>
-                  <div>{entry.totalTokens > 0 ? <span className="font-medium text-foreground">{formatCost(entry.totalCost / entry.requestCount)}</span> : '-'} {t('avgPerReq')}</div>
+                  <div>{costInfo.costPerRecord == null ? 'Unknown' : <span className="font-medium text-foreground">{formatCost(costInfo.costPerRecord)}</span>} avg/priced record{costInfo.partial ? ' (partial)' : ''}</div>
                 </div>
               </div>
             )
@@ -751,7 +758,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
           <div className="text-sm text-muted-foreground">{t('tasksWithCosts')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-foreground">{formatCost(taskData.summary.totalCost)}</div>
+          <div className="text-3xl font-bold text-foreground">{taskData.summary.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.summary).label}</div>
           <div className="text-sm text-muted-foreground">{t('attributedCost')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
@@ -759,7 +766,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
           <div className="text-sm text-muted-foreground">{t('attributedTokens')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-orange-500">{formatCost(taskData.unattributed.totalCost)}</div>
+          <div className="text-3xl font-bold text-orange-500">{taskData.unattributed.requestCount === 0 ? 'No usage' : describeUsageCost(taskData.unattributed).label}</div>
           <div className="text-sm text-muted-foreground">{t('unattributed')}</div>
         </div>
       </div>
@@ -769,7 +776,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
         <h2 className="text-xl font-semibold mb-4">{t('tasksByCost')}</h2>
         <div className="space-y-2 max-h-[600px] overflow-y-auto">
           {taskData.tasks.map(task => (
-            <div key={task.taskId} className="border border-border rounded-lg p-4">
+            <div key={task.taskId} role="group" aria-label={`Task ${task.title}`} className="border border-border rounded-lg p-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
@@ -787,7 +794,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
                   }`}>{task.status}</span>
                 </div>
                 <div className="text-right shrink-0 ml-3">
-                  <div className="font-medium text-foreground">{formatCost(task.stats.totalCost)}</div>
+                  <div className="font-medium text-foreground">{describeUsageCost(task.stats).label}</div>
                   <div className="text-xs text-muted-foreground">{formatNumber(task.stats.totalTokens)} {t('tokens')} | {task.stats.requestCount} {t('reqs')}</div>
                 </div>
               </div>

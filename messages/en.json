@@ -480,8 +480,8 @@
   "memoryGraph": {
     "loading": "Loading graph...",
     "retry": "Retry",
-    "noMemoryDatabases": "No memory databases found",
-    "noMemoryDatabasesHint": "OpenClaw memory SQLite files not detected",
+    "noMemoryDatabases": "No SQLite memory indexes found",
+    "noMemoryDatabasesHint": "This graph uses OpenClaw's SQLite memory indexes. Browse your memory documents in Files, or open HQ for the vault source graph.",
     "allAgents": "all agents",
     "filterFiles": "filter files...",
     "statAgents": "agents",
@@ -855,6 +855,7 @@
     "today": "Today",
     "next": "Next",
     "calMode_agenda": "Agenda",
+    "calMode_day": "Day",
     "calMode_week": "Week",
     "calMode_month": "Month",
     "searchPlaceholder": "Search jobs...",

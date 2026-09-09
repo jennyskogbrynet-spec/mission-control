@@ -136,6 +136,7 @@ export interface Agent {
   name: string
   role: string
   session_key?: string
+  command_session_key?: string | null
   soul_content?: string
   working_memory?: string
   status: 'offline' | 'idle' | 'busy' | 'error'
@@ -388,15 +389,15 @@ interface MissionControlStore {
   setDefaultOrgName: (name: string) => void
 
   // Update availability
-  updateAvailable: { latestVersion: string; releaseUrl: string; releaseNotes: string } | null
+  updateAvailable: { latestVersion: string; releaseUrl: string; releaseNotes: string; managedRelease?: boolean; managedUpdateReason?: string | null } | null
   updateDismissedVersion: string | null
-  setUpdateAvailable: (info: { latestVersion: string; releaseUrl: string; releaseNotes: string } | null) => void
+  setUpdateAvailable: (info: { latestVersion: string; releaseUrl: string; releaseNotes: string; managedRelease?: boolean; managedUpdateReason?: string | null } | null) => void
   dismissUpdate: (version: string) => void
 
   // OpenClaw update availability
-  openclawUpdate: { installed: string; latest: string; releaseUrl: string; releaseNotes: string; updateCommand: string } | null
+  openclawUpdate: { installed: string; latest: string; releaseUrl: string; releaseNotes: string; updateCommand: string | null; updateBlocked?: boolean; updateBlockedReason?: string | null; canUpdate?: boolean } | null
   openclawUpdateDismissedVersion: string | null
-  setOpenclawUpdate: (info: { installed: string; latest: string; releaseUrl: string; releaseNotes: string; updateCommand: string } | null) => void
+  setOpenclawUpdate: (info: { installed: string; latest: string; releaseUrl: string; releaseNotes: string; updateCommand: string | null; updateBlocked?: boolean; updateBlockedReason?: string | null; canUpdate?: boolean } | null) => void
   dismissOpenclawUpdate: (version: string) => void
 
   // OpenClaw Doctor banner dismiss (persisted with 24h expiry)

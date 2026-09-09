@@ -4,10 +4,11 @@ import { useTranslations } from 'next-intl'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
-import { useMissionControl, CronJob } from '@/store'
+import { useMissionControl, CronJob as StoreCronJob } from '@/store'
+type CronJob = StoreCronJob & { everyMs?: number; anchorMs?: number }
 import { createClientLogger } from '@/lib/client-logger'
 const log = createClientLogger('CronManagement')
-import { buildDayKey, getCronOccurrences } from '@/lib/cron-occurrences'
+import { buildDayKey, getJobCalendarOccurrences } from '@/lib/cron-occurrences'
 import { describeCronFrequency } from '@/lib/cron-utils'
 
 interface DayJobSummary {
@@ -104,6 +105,7 @@ export function CronManagementPanel() {
   const { cronJobs, setCronJobs, dashboardMode } = useMissionControl()
   const isLocalMode = dashboardMode === 'local'
   const [isLoading, setIsLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [selectedJob, setSelectedJob] = useState<CronJob | null>(null)
   const [jobLogs, setJobLogs] = useState<any[]>([])
@@ -152,9 +154,15 @@ export function CronManagementPanel() {
 
   const loadCronJobs = useCallback(async () => {
     setIsLoading(true)
+    setLoadError(null)
     try {
       const cronResponse = await fetch('/api/cron?action=list')
       const cronData = await cronResponse.json()
+      if (!cronResponse.ok) {
+        const message = cronData.error || 'Unable to load the scheduler'
+        setLoadError(message)
+        if (!isLocalMode) throw new Error(message)
+      }
       const cronList = Array.isArray(cronData.jobs) ? cronData.jobs : []
 
       if (!isLocalMode) {
@@ -183,6 +191,7 @@ export function CronManagementPanel() {
       setCronJobs([...cronList, ...mappedSchedulerJobs])
     } catch (error) {
       log.error('Failed to load cron jobs:', error)
+      setLoadError(error instanceof Error ? error.message : 'Unable to load the scheduler')
     } finally {
       setIsLoading(false)
     }
@@ -257,6 +266,7 @@ export function CronManagementPanel() {
       const result = await response.json()
       if (result.success) {
         await loadCronJobs()
+        alert('Disabled copy created. Enable it when ready.')
       } else {
         alert(`Failed to clone job: ${result.error}`)
       }
@@ -334,7 +344,7 @@ export function CronManagementPanel() {
     }
 
     try {
-      const response = await fetch(`/api/cron?action=logs&job=${encodeURIComponent(job.name)}`)
+      const response = await fetch(`/api/cron?action=logs&job=${encodeURIComponent(job.id || job.name)}`)
       const data = await response.json()
       setJobLogs(data.logs || [])
     } catch (error) {
@@ -350,6 +360,7 @@ export function CronManagementPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'toggle',
+          jobId: job.id,
           jobName: job.name,
           enabled: !job.enabled
         })
@@ -400,10 +411,14 @@ export function CronManagementPanel() {
 
       const result = await response.json()
 
-      if (result.success) {
-        alert(`Job executed successfully:\n${result.stdout}`)
+      if (!response.ok || !result.success) {
+        alert(`Run request failed: ${result.error || 'Unknown error'}`)
+      } else if (result.result?.enqueued === true) {
+        alert('Run queued. Check run history for the outcome.')
+      } else if (result.result?.ran === true) {
+        alert('Run finished. Check run history for the outcome.')
       } else {
-        alert(`Job failed:\n${result.error}\n${result.stderr}`)
+        alert('The scheduler did not confirm whether the run started. Refresh before retrying.')
       }
     } catch (error) {
       log.error('Failed to trigger job:', error)
@@ -601,7 +616,8 @@ export function CronManagementPanel() {
   const jobSummariesByDay = useMemo(() => {
     const dayMap = new Map<string, DayJobSummary[]>()
     for (const job of filteredJobs) {
-      const occurrences = getCronOccurrences(job.schedule, calendarBounds.startMs, calendarBounds.endMs, 5000)
+      if (!job.enabled) continue
+      const occurrences = getJobCalendarOccurrences(job, calendarBounds.startMs, calendarBounds.endMs, 100000)
 
       // Fallback for unparseable schedules
       if (occurrences.length === 0 && typeof job.nextRun === 'number' && job.nextRun >= calendarBounds.startMs && job.nextRun < calendarBounds.endMs) {
@@ -639,7 +655,8 @@ export function CronManagementPanel() {
     if (calendarView !== 'agenda') return []
     const rows: Array<{ job: CronJob; atMs: number; dayKey: string }> = []
     for (const job of filteredJobs) {
-      const occurrences = getCronOccurrences(job.schedule, calendarBounds.startMs, calendarBounds.endMs, 50)
+      if (!job.enabled) continue
+      const occurrences = getJobCalendarOccurrences(job, calendarBounds.startMs, calendarBounds.endMs, 50)
       for (const occurrence of occurrences) {
         rows.push({ job, atMs: occurrence.atMs, dayKey: occurrence.dayKey })
       }
@@ -683,6 +700,7 @@ export function CronManagementPanel() {
 
   return (
     <div className="p-6 space-y-6">
+      {loadError && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{loadError}</div>}
       <div className="border-b border-border pb-4">
         <div className="flex items-center justify-between">
           <div>

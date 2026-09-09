@@ -7,6 +7,7 @@ import { runCommand, runOpenClaw } from './command'
 import { scanForInjection } from './injection-guard'
 import { isHermesInstalled, isHermesGatewayRunning, clearHermesDetectionCache } from './hermes-sessions'
 import { isOpenCodeInstalled, getOpenCodeVersion, scanOpenCodeSessions } from './opencode-sessions'
+import { detectGrokResearchRuntime } from './grok-research'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -159,7 +160,7 @@ ${truncated}
   }
 }
 
-export type RuntimeId = 'openclaw' | 'hermes' | 'claude' | 'codex' | 'opencode'
+export type RuntimeId = 'openclaw' | 'hermes' | 'claude' | 'codex' | 'opencode' | 'grok'
 export type DeploymentMode = 'local' | 'docker'
 
 export interface RuntimeStatus {
@@ -193,6 +194,12 @@ export interface RuntimeMeta {
 }
 
 const RUNTIME_META: Record<RuntimeId, RuntimeMeta> = {
+  grok: {
+    name: 'Grok Build',
+    description: 'Bounded public-web research with an isolated local harness and saved results.',
+    authRequired: true,
+    authHint: 'Run grok login locally, then verify access with a research run.',
+  },
   openclaw: {
     name: 'OpenClaw',
     description: 'Multi-agent orchestration with gateway, sessions, and memory.',
@@ -481,6 +488,11 @@ function detectOpenCode(): RuntimeStatus {
 }
 
 const DETECTORS: Record<RuntimeId, () => RuntimeStatus> = {
+  grok: () => {
+    const detected = detectGrokResearchRuntime()
+    return { id: 'grok', ...RUNTIME_META.grok, ...detected,
+      authHint: detected.credentialsPresent ? 'Saved credentials found; model access is verified when a research run completes.' : RUNTIME_META.grok.authHint }
+  },
   openclaw: detectOpenClaw,
   hermes: detectHermes,
   claude: detectClaude,
@@ -527,6 +539,11 @@ export function startInstall(runtime: RuntimeId, mode: DeploymentMode): InstallJ
 
   // Local install — run in background
   const INSTALL_FNS: Record<RuntimeId, (job: InstallJob) => Promise<void>> = {
+    grok: async (job) => {
+      job.status = 'failed'
+      job.error = 'Install Grok Build using the official xAI installer, then refresh detection.'
+      job.finishedAt = Date.now()
+    },
     openclaw: installOpenClawLocal,
     hermes: installHermesLocal,
     claude: installClaudeLocal,
@@ -754,6 +771,7 @@ export function getActiveJobs(): InstallJob[] {
 // ---------------------------------------------------------------------------
 
 export function generateDockerSidecar(runtime: RuntimeId): string {
+  if (runtime === 'grok') return '# Grok Build research runs locally. No official Grok Bot sidecar is configured.'
   if (runtime === 'openclaw') {
     return `  # OpenClaw Gateway sidecar
   openclaw-gateway:

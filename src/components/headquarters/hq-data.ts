@@ -1,14 +1,24 @@
-import type { HQLink, HQNote, HQProjectKey, HQTask } from '@/lib/hq-types'
+import type { HQLink, HQNote, HQProject, HQProjectKey, HQTask } from '@/lib/hq-types'
 
-export type ProjectFilter = HQProjectKey | 'all'
-export const projectNames: Record<ProjectFilter, string> = { all: 'Alle prosjekter', babyhub: 'BabyHub', babysential: 'Babysential', brrrr: 'brRRR', shared: 'Felles' }
+export type ProjectFilter = HQProjectKey | 'all' | `project:${number}`
+export const projectNames: Record<HQProjectKey | 'all', string> = { all: 'Alle prosjekter', babyhub: 'BabyHub', babysential: 'Babysential', brrrr: 'brRRR', shared: 'Felles' }
 export const projectColors: Record<HQProjectKey, string> = { babyhub: '#b4e6cf', babysential: '#b8c7f9', brrrr: '#e4c495', shared: '#b6c5d3' }
 export const kindNames = { source: 'Kilde', knowledge: 'Kunnskap', decision: 'Beslutning', learning: 'Læring', task: 'MC-oppgave' }
 export const relationNames: Record<HQLink['kind'], string> = { wikilink: 'Wikilenke', markdown: 'Dokumentlenke', 'task-source': 'Kilde for oppgave', evidence: 'Resultat / læring' }
-export const statusNames: Record<string, string> = { inbox: 'Innboks', assigned: 'Tildelt', in_progress: 'Pågår', review: 'Til gjennomgang', quality_review: 'Kvalitetskontroll', done: 'Ferdig', blocked: 'Blokkert', backlog: 'Planlagt', todo: 'Planlagt', open: 'Åpen', cancelled: 'Avbrutt' }
+export const statusNames: Record<string, string> = { inbox: 'Innboks', assigned: 'Tildelt', in_progress: 'Pågår', review: 'Til gjennomgang', quality_review: 'Kvalitetskontroll', done: 'Ferdig', blocked: 'Blokkert', backlog: 'Planlagt', todo: 'Planlagt', open: 'Åpen', cancelled: 'Avbrutt', failed: 'Mislyktes', wontfix: 'Avsluttet uten tiltak', awaiting_owner: 'Venter på eier' }
 export const priorityNames: Record<string, string> = { low: 'Lav', medium: 'Normal', high: 'Høy', urgent: 'Haster', critical: 'Kritisk' }
-export function inProject(item: { projectKey: HQProjectKey }, project: ProjectFilter) { return project === 'all' || item.projectKey === project || item.projectKey === 'shared' }
-export function isOpenTask(task: HQTask) { return !['done', 'completed', 'cancelled', 'archived'].includes(task.status) }
+export function inProject(item: { projectKey: HQProjectKey; projectId?: number | null }, project: ProjectFilter, projects: HQProject[] = []) {
+  if (project === 'all') return true
+  if (project.startsWith('project:')) {
+    const record = projects.find(value => value.id === Number(project.slice(8)))
+    if (!record) return false
+    if ('projectId' in item) return item.projectId === record.id
+    return item.projectKey === 'shared' || item.projectKey === record.key
+  }
+  return item.projectKey === project || (!('projectId' in item) && item.projectKey === 'shared')
+}
+export function taskProjectName(task: HQTask) { return task.projectName || projectNames[task.projectKey] }
+export function isOpenTask(task: HQTask) { return !['done', 'completed', 'cancelled', 'archived', 'failed', 'wontfix'].includes(task.status) }
 export function priorityTasks(tasks: HQTask[]) {
   const rank: Record<string, number> = { critical: 0, urgent: 1, high: 2, medium: 3, low: 4 }
   return tasks.filter(isOpenTask).slice().sort((a, b) => (rank[a.priority] ?? 5) - (rank[b.priority] ?? 5) || b.updatedAt.localeCompare(a.updatedAt))

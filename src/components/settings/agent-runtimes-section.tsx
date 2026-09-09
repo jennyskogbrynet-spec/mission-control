@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
+import { GrokResearchPanel } from './grok-research-panel'
 import { RuntimeSetupModal } from '@/components/onboarding/runtime-setup-modal'
 
 interface RuntimeStatus {
@@ -239,7 +240,7 @@ export function AgentRuntimesSection({ showFeedback }: Props) {
 
                       <div className="flex items-center gap-1.5">
                         <Button variant="ghost" size="sm" onClick={() => handleDetect(rt.id)} className="text-2xs h-6 px-2">Refresh</Button>
-                        {!rt.installed && !justInstalled && (
+                        {!rt.installed && !justInstalled && rt.id !== 'grok' && (
                           <>
                             <Button variant="ghost" size="sm" onClick={() => handleInstall(rt.id)} className="text-2xs h-6 px-2">Install</Button>
                             {isDocker && (
@@ -258,7 +259,7 @@ export function AgentRuntimesSection({ showFeedback }: Props) {
                       </p>
                     )}
 
-                    {(rt.installed || justInstalled) && (
+                    {(rt.installed || justInstalled) && rt.id !== 'grok' && (
                       <button
                         onClick={() => setSetupRuntime(rt.id as 'openclaw' | 'hermes' | 'claude' | 'codex' | 'opencode')}
                         className="text-2xs mt-1.5 px-2 py-1 rounded border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
@@ -266,6 +267,8 @@ export function AgentRuntimesSection({ showFeedback }: Props) {
                         Configure {rt.name}
                       </button>
                     )}
+
+                    {rt.id === 'grok' && rt.installed && <GrokResearchPanel />}
 
                     {installFailed && (
                       <div className="mt-2 space-y-1">

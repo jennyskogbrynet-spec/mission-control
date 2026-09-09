@@ -44,6 +44,7 @@ interface PairedDevice {
   publicKey?: string
   pairedAt?: number
   lastSeen?: number
+  lastSeenAtMs?: number
   trusted?: boolean
   roles?: string[]
   scopes?: string[]
@@ -102,19 +103,21 @@ export function NodesPanel() {
   const [nodes, setNodes] = useState<PresenceEntry[]>([])
   const [devices, setDevices] = useState<PairedDevice[]>([])
   const [pendingDevices, setPendingDevices] = useState<PendingDevice[]>([])
-  const [connected, setConnected] = useState(true)
+  const [connected, setConnected] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [deviceError, setDeviceError] = useState<string | null>(null)
 
   const fetchNodes = useCallback(async () => {
     try {
       const res = await fetch('/api/nodes')
-      if (!res.ok) { setError('Failed to fetch nodes'); return }
       const data = await res.json()
+      if (!res.ok) { setConnected(false); setError(data.error || 'Failed to fetch nodes'); return }
       setNodes(data.nodes || data.entries || [])
       setConnected(data.connected !== false)
       setError(null)
     } catch {
+      setConnected(false)
       setError('Failed to fetch nodes')
     } finally {
       setLoading(false)
@@ -124,12 +127,13 @@ export function NodesPanel() {
   const fetchDevices = useCallback(async () => {
     try {
       const res = await fetch('/api/nodes?action=devices')
-      if (!res.ok) return
       const data = await res.json()
+      if (!res.ok) { setDeviceError(data.error || 'Failed to fetch devices'); return }
+      setDeviceError(null)
       setDevices(data.paired || data.devices || [])
       setPendingDevices(data.pending || [])
     } catch {
-      // silent fallback
+      setDeviceError('Failed to fetch devices')
     }
   }, [])
 
@@ -184,9 +188,9 @@ export function NodesPanel() {
         </Button>
       </div>
 
-      {error && (
+      {(tab === 'devices' ? deviceError : error) && (
         <div className="mb-4 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-          {error}
+          {tab === 'devices' ? deviceError : error}
         </div>
       )}
 
@@ -482,7 +486,7 @@ function PairedDevicesSection({
                     {relativeTime(device.pairedAt || device.approvedAtMs || device.createdAtMs || 0)}
                   </td>
                   <td className="py-2 pr-4 text-muted-foreground text-xs">
-                    {device.lastSeen ? relativeTime(device.lastSeen) : '--'}
+                    {device.lastSeen || device.lastSeenAtMs ? relativeTime(device.lastSeen || device.lastSeenAtMs || 0) : '--'}
                   </td>
                   <td className="py-2 pr-4">
                     {device.trusted ? (
@@ -491,7 +495,7 @@ function PairedDevicesSection({
                       </span>
                     ) : (
                       <span className="inline-flex px-2 py-0.5 rounded text-xs font-medium border bg-zinc-500/20 text-zinc-400 border-zinc-500/30">
-                        {t('untrusted')}
+                        {device.trusted === false ? t('untrusted') : 'Not reported'}
                       </span>
                     )}
                   </td>

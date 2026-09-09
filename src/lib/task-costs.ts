@@ -1,4 +1,7 @@
+import type { TokenUsageRecord } from '@/lib/token-ledger'
+
 export interface TokenCostRecord {
+  costSource?: TokenUsageRecord['costSource']
   model: string
   agentName: string
   timestamp: number
@@ -8,6 +11,8 @@ export interface TokenCostRecord {
 }
 
 export interface TokenStats {
+  pricedTokens: number
+  pricedRecordCount: number
   totalTokens: number
   totalCost: number
   requestCount: number
@@ -70,6 +75,8 @@ export function calculateStats(records: TokenCostRecord[]): TokenStats {
     return {
       totalTokens: 0,
       totalCost: 0,
+      pricedTokens: 0,
+      pricedRecordCount: 0,
       requestCount: 0,
       avgTokensPerRequest: 0,
       avgCostPerRequest: 0,
@@ -79,10 +86,13 @@ export function calculateStats(records: TokenCostRecord[]): TokenStats {
   const totalTokens = records.reduce((sum, r) => sum + r.totalTokens, 0)
   const totalCost = records.reduce((sum, r) => sum + r.cost, 0)
   const requestCount = records.length
+  const pricedRecords = records.filter(record => record.costSource != null && record.costSource !== 'unknown')
 
   return {
     totalTokens,
     totalCost,
+    pricedTokens: pricedRecords.reduce((sum, record) => sum + record.totalTokens, 0),
+    pricedRecordCount: pricedRecords.length,
     requestCount,
     avgTokensPerRequest: Math.round(totalTokens / requestCount),
     avgCostPerRequest: totalCost / requestCount,
@@ -90,13 +100,13 @@ export function calculateStats(records: TokenCostRecord[]): TokenStats {
 }
 
 function groupByModel(records: TokenCostRecord[]): Record<string, TokenStats> {
-  const modelGroups: Record<string, TokenCostRecord[]> = {}
+  const modelGroups: Record<string, TokenCostRecord[]> = Object.create(null)
   for (const record of records) {
     if (!modelGroups[record.model]) modelGroups[record.model] = []
     modelGroups[record.model].push(record)
   }
 
-  const result: Record<string, TokenStats> = {}
+  const result: Record<string, TokenStats> = Object.create(null)
   for (const [model, modelRecords] of Object.entries(modelGroups)) {
     result[model] = calculateStats(modelRecords)
   }
@@ -104,7 +114,7 @@ function groupByModel(records: TokenCostRecord[]): Record<string, TokenStats> {
 }
 
 function buildTimeline(records: TokenCostRecord[]): Array<{ date: string; cost: number; tokens: number }> {
-  const byDate: Record<string, { cost: number; tokens: number }> = {}
+  const byDate: Record<string, { cost: number; tokens: number }> = Object.create(null)
 
   for (const record of records) {
     const date = new Date(record.timestamp).toISOString().split('T')[0]
@@ -126,10 +136,11 @@ function formatTicketRef(prefix?: string | null, num?: number | null): string | 
 }
 
 export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Record<number, TaskCostMetadata>): TaskCostReport {
-  const attributedRecords = records.filter((record) => Number.isFinite(record.taskId))
-  const unattributedRecords = records.filter((record) => !Number.isFinite(record.taskId))
+  const hasVisibleTask = (record: TokenCostRecord) => Number.isSafeInteger(record.taskId) && Number(record.taskId) > 0 && Boolean(taskMetadata[Number(record.taskId)])
+  const attributedRecords = records.filter(hasVisibleTask)
+  const unattributedRecords = records.filter(record => !hasVisibleTask(record))
 
-  const byTask: Record<number, TokenCostRecord[]> = {}
+  const byTask: Record<number, TokenCostRecord[]> = Object.create(null)
   for (const record of attributedRecords) {
     const taskId = Number(record.taskId)
     if (!taskMetadata[taskId]) continue
@@ -160,7 +171,7 @@ export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Re
     })
     .sort((a, b) => b.stats.totalCost - a.stats.totalCost)
 
-  const byAgent: Record<string, TokenCostRecord[]> = {}
+  const byAgent: Record<string, TokenCostRecord[]> = Object.create(null)
   for (const record of attributedRecords) {
     const taskId = Number(record.taskId)
     if (!taskMetadata[taskId]) continue
@@ -168,7 +179,7 @@ export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Re
     byAgent[record.agentName].push(record)
   }
 
-  const agentTaskIds: Record<string, Set<number>> = {}
+  const agentTaskIds: Record<string, Set<number>> = Object.create(null)
   for (const task of tasks) {
     const taskRecords = byTask[task.taskId] || []
     for (const record of taskRecords) {
@@ -178,7 +189,7 @@ export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Re
     }
   }
 
-  const agents: Record<string, AgentTaskCostEntry> = {}
+  const agents: Record<string, AgentTaskCostEntry> = Object.create(null)
   for (const [agent, agentRecords] of Object.entries(byAgent)) {
     const taskIds = [...(agentTaskIds[agent] || new Set<number>())].sort((a, b) => a - b)
     agents[agent] = {
@@ -188,8 +199,8 @@ export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Re
     }
   }
 
-  const byProject: Record<string, TokenCostRecord[]> = {}
-  const projectTaskIds: Record<string, Set<number>> = {}
+  const byProject: Record<string, TokenCostRecord[]> = Object.create(null)
+  const projectTaskIds: Record<string, Set<number>> = Object.create(null)
   for (const record of attributedRecords) {
     const taskId = Number(record.taskId)
     const meta = taskMetadata[taskId]
@@ -201,7 +212,7 @@ export function buildTaskCostReport(records: TokenCostRecord[], taskMetadata: Re
     projectTaskIds[key].add(taskId)
   }
 
-  const projects: Record<string, ProjectTaskCostEntry> = {}
+  const projects: Record<string, ProjectTaskCostEntry> = Object.create(null)
   for (const [projectKey, projectRecords] of Object.entries(byProject)) {
     const taskIds = [...(projectTaskIds[projectKey] || new Set<number>())].sort((a, b) => a - b)
     projects[projectKey] = {

@@ -1,12 +1,19 @@
 export type HQProjectKey = 'babyhub' | 'babysential' | 'brrrr' | 'shared'
-export type HQView = 'overview' | 'knowledge' | 'decisions' | 'analysis'
+export type HQView = 'overview' | 'knowledge' | 'decisions' | 'analysis' | 'projects'
 export interface HQProject {
-  id: number | null
-  key: HQProjectKey
+  id: number
+  key: HQProjectKey | null
   name: string
   description: string
   color: string
   noteCount: number
+  slug?: string
+  ticketPrefix?: string
+  assignedAgents?: string[]
+  assignedAgentRoles?: Record<string, string>
+  githubRepo?: string | null
+  deadline?: string | null
+  taskCounts?: { total: number; open: number; inProgress: number; blocked: number; done: number }
 }
 export interface HQNote {
   id: string
@@ -39,6 +46,7 @@ export interface HQTask {
   status: string
   priority: string
   projectId: number | null
+  projectName?: string
   projectKey: HQProjectKey
   assignedTo: string | null
   ticketRef: string | null
@@ -109,6 +117,7 @@ export interface HQSearchResponse {
   detail?: string
 }
 export interface HQTaskCreateInput {
+  projectId?: number
   title: string
   description: string
   projectKey: HQProjectKey

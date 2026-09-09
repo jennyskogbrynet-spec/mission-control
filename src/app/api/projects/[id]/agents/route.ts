@@ -9,8 +9,8 @@ import {
 } from '@/lib/workspaces'
 
 function toProjectId(raw: string): number {
-  const id = Number.parseInt(raw, 10)
-  return Number.isFinite(id) ? id : NaN
+  const id = Number(raw)
+  return /^[1-9]\d*$/.test(raw) && Number.isSafeInteger(id) ? id : NaN
 }
 
 export async function GET(
@@ -106,7 +106,9 @@ export async function POST(
     const agentName = String(body?.agent_name || '').trim()
     const role = String(body?.role || 'member').trim()
 
-    if (!agentName) return NextResponse.json({ error: 'agent_name is required' }, { status: 400 })
+    if (!agentName || agentName.length > 200 || !role || role.length > 80) return NextResponse.json({ error: 'Valid agent_name and role are required' }, { status: 400 })
+    const agent = db.prepare('SELECT id FROM agents WHERE name = ? AND workspace_id = ?').get(agentName, workspaceId)
+    if (!agent) return NextResponse.json({ error: 'Agent not found in this workspace' }, { status: 404 })
 
     db.prepare(`
       INSERT OR IGNORE INTO project_agent_assignments (project_id, agent_name, role)

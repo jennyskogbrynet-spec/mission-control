@@ -109,7 +109,7 @@ const obsidianTheme: Theme = {
 export function MemoryGraph() {
   const t = useTranslations('memoryGraph')
   const { memoryGraphAgents, setMemoryGraphAgents } = useMissionControl()
-  const agents = memoryGraphAgents || []
+  const agents = useMemo(() => memoryGraphAgents || [], [memoryGraphAgents])
   const [selectedAgent, setSelectedAgent] = useState<string>('all')
   const [isLoading, setIsLoading] = useState(memoryGraphAgents === null)
   const [error, setError] = useState<string | null>(null)
@@ -358,7 +358,7 @@ export function MemoryGraph() {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2" style={{ background: '#11111b' }}>
         <span className="text-[#6c7086] text-sm">{t('noMemoryDatabases')}</span>
-        <span className="text-[#45475a] text-xs">{t('noMemoryDatabasesHint')}</span>
+        <span className="max-w-md px-4 text-center text-[#6c7086] text-xs leading-relaxed">{t('noMemoryDatabasesHint')}</span>
       </div>
     )
   }

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
@@ -14,6 +14,7 @@ interface Agent {
   name: string
   role: string
   session_key?: string
+  command_session_key?: string | null
   soul_content?: string
   working_memory?: string
   status: 'offline' | 'idle' | 'busy' | 'error'
@@ -74,6 +75,7 @@ export function OverviewTab({
   saveBusy,
   onStatusUpdate,
   onWakeAgent,
+  waking = false,
   onEdit,
   onCancel,
   heartbeatData,
@@ -88,6 +90,7 @@ export function OverviewTab({
   saveBusy?: boolean
   onStatusUpdate: (name: string, status: Agent['status'], activity?: string) => Promise<void>
   onWakeAgent: (name: string, sessionKey: string) => Promise<void>
+  waking?: boolean
   onEdit: () => void
   onCancel: () => void
   heartbeatData: HeartbeatResponse | null
@@ -155,9 +158,10 @@ export function OverviewTab({
                 {status}
               </button>
             ))}
-            {agent.session_key && (
+            {(agent.command_session_key || agent.session_key) && (
               <button
-                onClick={() => onWakeAgent(agent.name, agent.session_key!)}
+                disabled={waking}
+                onClick={() => onWakeAgent(agent.name, (agent.command_session_key || agent.session_key)!)}
                 className="ml-auto px-3 py-1 text-xs rounded-full border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition-colors"
               >
                 Wake
@@ -167,7 +171,7 @@ export function OverviewTab({
               onClick={onPerformHeartbeat}
               disabled={loadingHeartbeat}
               className="px-3 py-1 text-xs rounded-full border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 ml-auto"
-              style={agent.session_key ? { marginLeft: 0 } : undefined}
+              style={(agent.command_session_key || agent.session_key) ? { marginLeft: 0 } : undefined}
             >
               {loadingHeartbeat ? '...' : t('heartbeat')}
             </button>
@@ -2165,7 +2169,7 @@ export function FilesTab({ agent }: { agent: Agent }) {
   const [saving, setSaving] = useState(false)
   const [workspace, setWorkspace] = useState<string | null>(null)
 
-  const loadFiles = async () => {
+  const loadFiles = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -2187,9 +2191,9 @@ export function FilesTab({ agent }: { agent: Agent }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [agent.id])
 
-  useEffect(() => { loadFiles() }, [agent.id])
+  useEffect(() => { loadFiles() }, [loadFiles])
 
   const activeEntry = activeFile ? files.find(f => f.name === activeFile) : null
   const baseContent = activeEntry?.content || ''

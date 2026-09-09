@@ -1,81 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { config } from '@/lib/config'
 import { logger } from '@/lib/logger'
 import { callOpenClawGateway } from '@/lib/openclaw-gateway'
 
-const GATEWAY_TIMEOUT = 5000
-
-/** Probe the gateway HTTP /health endpoint to check reachability. */
-async function isGatewayReachable(): Promise<boolean> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT)
-  try {
-    const res = await fetch(
-      `http://${config.gatewayHost}:${config.gatewayPort}/health`,
-      { signal: controller.signal },
-    )
-    return res.ok
-  } catch {
-    return false
-  } finally {
-    clearTimeout(timeout)
-  }
-}
+const GATEWAY_TIMEOUT = 10000
 
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
-
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local gateway devices belong to the primary workspace only' }, { status: 403 })
+  }
   const action = request.nextUrl.searchParams.get('action') || 'list'
-
-  if (action === 'list') {
-    try {
-      const connected = await isGatewayReachable()
-      if (!connected) {
-        return NextResponse.json({ nodes: [], connected: false })
-      }
-
-      try {
-        const data = await callOpenClawGateway<{ nodes?: unknown[] }>('node.list', {}, GATEWAY_TIMEOUT)
-        return NextResponse.json({ nodes: data?.nodes ?? [], connected: true })
-      } catch (rpcErr) {
-        // Gateway is reachable but openclaw CLI unavailable (e.g. Docker) or
-        // node.list not supported — return connected=true with empty node list
-        logger.warn({ err: rpcErr }, 'node.list RPC failed, returning empty node list')
-        return NextResponse.json({ nodes: [], connected: true })
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Gateway unreachable for node listing')
-      return NextResponse.json({ nodes: [], connected: false })
-    }
+  if (action !== 'list' && action !== 'devices') {
+    return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 })
   }
-
-  if (action === 'devices') {
-    try {
-      const connected = await isGatewayReachable()
-      if (!connected) {
-        return NextResponse.json({ devices: [] })
-      }
-
-      try {
-        const data = await callOpenClawGateway<{ devices?: unknown[] }>(
-          'device.pair.list',
-          {},
-          GATEWAY_TIMEOUT,
-        )
-        return NextResponse.json({ devices: data?.devices ?? [] })
-      } catch (rpcErr) {
-        logger.warn({ err: rpcErr }, 'device.pair.list RPC failed, returning empty device list')
-        return NextResponse.json({ devices: [] })
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Gateway unreachable for device listing')
-      return NextResponse.json({ devices: [] })
+  try {
+    if (action === 'list') {
+      const data = await callOpenClawGateway<{ nodes?: unknown[] }>('node.list', {}, GATEWAY_TIMEOUT)
+      if (!Array.isArray(data?.nodes)) throw new Error('Invalid node list')
+      return NextResponse.json({ nodes: data.nodes, connected: true })
     }
+    const data = await callOpenClawGateway<{ devices?: unknown[]; paired?: unknown[]; pending?: unknown[] }>('device.pair.list', {}, GATEWAY_TIMEOUT)
+    const paired = data?.paired ?? data?.devices
+    if (!Array.isArray(paired)) throw new Error('Invalid device list')
+    return NextResponse.json({ devices: paired, paired, pending: data.pending ?? [], connected: true })
+  } catch {
+    logger.warn({ action }, 'Gateway node/device list unavailable')
+    return NextResponse.json({ connected: false, error: 'Gateway node/device data is unavailable. Retry after checking the gateway connection.' }, { status: 502 })
   }
-
-  return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 })
 }
 
 const VALID_DEVICE_ACTIONS = ['approve', 'reject', 'rotate-token', 'revoke-token'] as const
@@ -96,6 +49,9 @@ const ACTION_RPC_MAP: Record<DeviceAction, { method: string; paramKey: 'requestI
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (auth.user.workspace_id !== 1 || auth.user.tenant_id !== 1) {
+    return NextResponse.json({ error: 'Local gateway devices belong to the primary workspace only' }, { status: 403 })
+  }
 
   let body: Record<string, unknown>
   try {

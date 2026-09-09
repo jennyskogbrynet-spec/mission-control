@@ -16,18 +16,20 @@ export function OpenClawUpdateBanner() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [newVersion, setNewVersion] = useState<string | null>(null)
   const [showChangelog, setShowChangelog] = useState(false)
+  const [showHoldDetails, setShowHoldDetails] = useState(false)
 
   if (!openclawUpdate) return null
   if (openclawUpdateDismissedVersion === openclawUpdate.latest) return null
 
   function handleCopy() {
-    navigator.clipboard.writeText(openclawUpdate!.updateCommand).then(() => {
+    navigator.clipboard.writeText(openclawUpdate!.updateCommand || '').then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }).catch(() => {})
   }
 
   async function handleUpdate() {
+    if (!openclawUpdate?.canUpdate || openclawUpdate.updateBlocked) return
     setState('updating')
     setErrorMsg(null)
 
@@ -36,6 +38,11 @@ export function OpenClawUpdateBanner() {
       const data = await res.json()
 
       if (!res.ok) {
+        if (data.updateBlocked) {
+          setOpenclawUpdate({ ...openclawUpdate!, updateBlocked: true, updateBlockedReason: data.detail, canUpdate: false, updateCommand: null })
+          setState('idle')
+          return
+        }
         setState('error')
         setErrorMsg(data.detail || data.error || t('updateFailed'))
         return
@@ -72,20 +79,29 @@ export function OpenClawUpdateBanner() {
           {state === 'idle' && (
             <>
               <span className="font-medium text-cyan-200">
-                {t('openclawUpdateAvailable', { version: openclawUpdate.latest })}
+                {openclawUpdate.updateBlocked ? `OpenClaw ${openclawUpdate.latest}: update paused` : t('openclawUpdateAvailable', { version: openclawUpdate.latest })}
               </span>
               {' ('}{t('installed', { version: openclawUpdate.installed })}{')'}
+              {openclawUpdate.updateBlocked && <span className="block mt-1">This release still needs compatibility checks. Your current version remains active.</span>}
             </>
           )}
         </p>
         {!busy && state !== 'success' && (
           <>
-            <button
+            {openclawUpdate.updateBlocked && openclawUpdate.updateBlockedReason && <button
+              onClick={() => setShowHoldDetails(v => !v)}
+              aria-expanded={showHoldDetails}
+              aria-controls="openclaw-update-hold-details"
+              className="shrink-0 text-2xs font-medium text-cyan-400 hover:text-cyan-300 px-2 py-1 rounded border border-cyan-500/20 hover:border-cyan-500/40 transition-colors"
+            >
+              {showHoldDetails ? 'Hide details' : 'Details'}
+            </button>}
+            {openclawUpdate.canUpdate === true && !openclawUpdate.updateBlocked && <button
               onClick={handleUpdate}
               className="shrink-0 text-2xs font-medium text-cyan-900 bg-cyan-500 hover:bg-cyan-400 px-2.5 py-1 rounded transition-colors"
             >
               {tc('updateNow')}
-            </button>
+            </button>}
             {openclawUpdate.releaseNotes && (
               <button
                 onClick={() => setShowChangelog(v => !v)}
@@ -94,12 +110,12 @@ export function OpenClawUpdateBanner() {
                 {t('changelog')} {showChangelog ? '▴' : '▾'}
               </button>
             )}
-            <button
+            {openclawUpdate.updateCommand && !openclawUpdate.updateBlocked && <button
               onClick={handleCopy}
               className="shrink-0 text-2xs font-medium text-cyan-400 hover:text-cyan-300 px-2 py-1 rounded border border-cyan-500/20 hover:border-cyan-500/40 transition-colors"
             >
               {copied ? t('copied') : t('copyCommand')}
-            </button>
+            </button>}
             <a
               href={openclawUpdate.releaseUrl}
               target="_blank"
@@ -128,6 +144,11 @@ export function OpenClawUpdateBanner() {
           </svg>
         )}
       </div>
+      {showHoldDetails && openclawUpdate.updateBlocked && openclawUpdate.updateBlockedReason && (
+        <div id="openclaw-update-hold-details" className="mt-1 px-4 py-3 rounded-lg bg-cyan-500/5 border border-cyan-500/10 text-xs text-cyan-300/80 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+          {openclawUpdate.updateBlockedReason}
+        </div>
+      )}
       {showChangelog && openclawUpdate.releaseNotes && (
         <div className="mt-1 px-4 py-3 rounded-lg bg-cyan-500/5 border border-cyan-500/10 text-xs text-cyan-300/80 whitespace-pre-wrap max-h-64 overflow-y-auto">
           {openclawUpdate.releaseNotes}
