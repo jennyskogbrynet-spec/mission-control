@@ -75,6 +75,33 @@ export function computePricedCoverage(entries: readonly ModelTokenTotal[]): Pric
   }
 }
 
+/**
+ * Coverage to gate on, preferring the server's own measurement.
+ *
+ * `/api/tokens` reports `coverage.pricedTokenPercent` (see `lib/token-ledger.ts`)
+ * over the same ledger this panel renders, but with the fuller view of which
+ * records carry a known price — reported costs, excluded duplicates and
+ * snapshot overlaps included. The client-side `computePricedCoverage` only sees
+ * the per-model token breakdown, so it is the weaker of the two and stays as the
+ * fallback for payloads that carry no coverage envelope.
+ *
+ * The two scales differ: the server reports a percentage (0-100), the gate works
+ * in [0, 1]. An explicit `null` from the server is an answer ("no tokens in this
+ * timeframe"), not an absence, and is passed straight through so the display
+ * withholds for the server's stated reason rather than a recomputed one.
+ */
+export function resolveDisplayCoverage(
+  serverPricedTokenPercent: number | null | undefined,
+  clientCoverage: PricedCoverage,
+): { coverage: number | null; source: 'server' | 'client' } {
+  if (serverPricedTokenPercent === null) return { coverage: null, source: 'server' }
+  if (typeof serverPricedTokenPercent === 'number' && Number.isFinite(serverPricedTokenPercent)) {
+    const clamped = Math.min(100, Math.max(0, serverPricedTokenPercent))
+    return { coverage: clamped / 100, source: 'server' }
+  }
+  return { coverage: clientCoverage.coverage, source: 'client' }
+}
+
 /** Whether a dollar amount may be rendered at this coverage. Unknown means no. */
 export function isCostDisplayable(coverage: number | null | undefined): boolean {
   if (typeof coverage !== 'number' || !Number.isFinite(coverage)) return false

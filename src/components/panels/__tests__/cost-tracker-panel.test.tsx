@@ -9,6 +9,21 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null, Tooltip: () => null, Legend: () => null, BarChart: () => null, Bar: () => null,
 }))
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+// These tests are about per-row pricing semantics: unknown vs a true local zero
+// vs a partial amount. The panel-wide coverage gate (lib/cost-display.ts) is a
+// second, independent rule that withholds every amount when the ledger as a
+// whole is barely priced — which these fixtures are, since they deliberately
+// contain mostly-unpriced models. Production responses carry a coverage
+// envelope from /api/tokens; supplying a fully-priced one here keeps the gate
+// out of the way so each assertion still tests the row semantics it was written
+// for. Coverage gating itself is covered in cost-tracker-scope.test.tsx.
+const fullyPricedCoverage = {
+  sourceRecords: { database: 1, manual: 0, sessionSnapshots: 0 },
+  billedCost: 0, estimatedCost: 0, excludedReportedRecords: 0,
+  pricedTokenPercent: 100, unknownCostTokens: 0, excludedSnapshots: 0,
+  unavailableSources: [] as string[], unattributedTokens: 0,
+}
 describe('cost rows with incomplete pricing', () => {
   it('shows unknown model/agent costs, true local zero and exact tiny-cost shares', async () => {
     const pricing = { pricedTokens: 4, pricedRecordCount: 1 }
@@ -16,6 +31,7 @@ describe('cost rows with incomplete pricing', () => {
     const stats = (totalTokens: number, totalCost: number, priced: typeof pricing) => ({ totalTokens, totalCost, requestCount: 1, avgTokensPerRequest: totalTokens, avgCostPerRequest: totalCost, ...priced })
     const agent = (name: string, totalTokens: number, totalCost: number, priced: typeof pricing) => ({ agent: name, total_tokens: totalTokens, total_cost: totalCost, total_input_tokens: totalTokens, total_output_tokens: 0, session_count: 1, request_count: 1, last_active: '2026-09-08T00:00:00Z', models: [], pricing: priced })
     const data = {
+      coverage: fullyPricedCoverage,
       summary: stats(1701004, 0.000014, { pricedTokens: 1004, pricedRecordCount: 2 }), models: { 'claude-sonnet-5': stats(4, 0.000014, pricing), 'glm-5.2': stats(1700000, 0, unknown), 'ollama/qwen2.5:3b': stats(1000, 0, { pricedTokens: 1000, pricedRecordCount: 1 }) }, sessions: {},
       agentBreakdown: { agents: [agent('main', 4, 0.000014, pricing), agent('research', 1700000, 0, unknown), agent('local', 1000, 0, { pricedTokens: 1000, pricedRecordCount: 1 })], summary: { total_cost: 0.000014, total_tokens: 1701004, agent_count: 3, days: 1, pricing: { pricedTokens: 1004, pricedRecordCount: 2 } } },
     }
@@ -39,7 +55,7 @@ it('preserves unknown, local zero and partial amounts through Sessions and Tasks
   const taskData = { summary: { ...stats(0.000014, 1004, 11), totalTokens: 3000, requestCount: 30 }, unattributed: stats(0, 0, 0), agents: {}, tasks: records.map((record, id) => ({ taskId: id + 1, title: record.name, stats: record.stats, status: 'done', priority: 'medium', project: {}, models: {} })) }
   vi.stubGlobal('fetch', vi.fn(async (url: string) => Response.json(
     url.includes('session-costs') ? { sessions: records.map(record => ({ sessionId: record.name, model: record.name, inputTokens: 1000, outputTokens: 0, firstSeen: '', lastSeen: '', ...record.stats })) } :
-    url.includes('action=stats') ? { summary: { ...stats(0.000014, 1004, 11), totalTokens: 3000, requestCount: 30 }, models: {}, sessions: {} } :
+    url.includes('action=stats') ? { coverage: fullyPricedCoverage, summary: { ...stats(0.000014, 1004, 11), totalTokens: 3000, requestCount: 30 }, models: {}, sessions: {} } :
     url.includes('trends') ? { trends: [] } : taskData,
   )))
   render(<CostTrackerPanel />)

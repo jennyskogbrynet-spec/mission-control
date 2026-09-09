@@ -5,6 +5,7 @@ import {
   COST_COVERAGE_TOOLTIP,
   COST_UNAVAILABLE_PLACEHOLDER,
   computePricedCoverage,
+  resolveDisplayCoverage,
   isCostDisplayable,
   formatGatedCost,
 } from '../cost-display'
@@ -103,5 +104,54 @@ describe('formatGatedCost', () => {
 describe('COST_COVERAGE_TOOLTIP', () => {
   it('explains why the amount is hidden', () => {
     expect(COST_COVERAGE_TOOLTIP).toBe('Priced coverage below 50 %')
+  })
+})
+
+
+describe('resolveDisplayCoverage', () => {
+  const clientCoverage = computePricedCoverage([
+    { model: 'claude-sonnet-4-5', totalTokens: 3_336 },
+    { model: 'openclaw-cron-runtime', totalTokens: 2_406_664 },
+  ])
+
+  it('prefers the server measurement and converts its percent to a fraction', () => {
+    // `/api/tokens` reports coverage.pricedTokenPercent on a 0-100 scale
+    // (lib/token-ledger.ts), while the gate works in [0, 1].
+    const resolved = resolveDisplayCoverage(90, clientCoverage)
+    expect(resolved.source).toBe('server')
+    expect(resolved.coverage).toBeCloseTo(0.9, 10)
+    expect(isCostDisplayable(resolved.coverage)).toBe(true)
+  })
+
+  it('treats an explicit null from the server as a measured "no usage", not as absence', () => {
+    // The server sets null when there were no tokens at all. That is an answer,
+    // so it must not silently fall through to a client number computed from a
+    // payload the server already declared empty.
+    const resolved = resolveDisplayCoverage(null, clientCoverage)
+    expect(resolved.source).toBe('server')
+    expect(resolved.coverage).toBeNull()
+    expect(isCostDisplayable(resolved.coverage)).toBe(false)
+  })
+
+  it('falls back to the client computation when the server field is absent', () => {
+    const resolved = resolveDisplayCoverage(undefined, clientCoverage)
+    expect(resolved.source).toBe('client')
+    expect(resolved.coverage).toBe(clientCoverage.coverage)
+  })
+
+  it('falls back when the server field is not a usable number', () => {
+    expect(resolveDisplayCoverage(Number.NaN, clientCoverage).source).toBe('client')
+    expect(resolveDisplayCoverage(Number.POSITIVE_INFINITY, clientCoverage).source).toBe('client')
+  })
+
+  it('clamps a server percent outside 0-100 instead of producing an impossible share', () => {
+    expect(resolveDisplayCoverage(140, clientCoverage).coverage).toBe(1)
+    expect(resolveDisplayCoverage(-5, clientCoverage).coverage).toBe(0)
+  })
+
+  it('still gates when the server reports coverage below the threshold', () => {
+    const resolved = resolveDisplayCoverage(0.14, clientCoverage)
+    expect(resolved.coverage).toBeCloseTo(0.0014, 10)
+    expect(formatGatedCost(0.00024, resolved.coverage, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
   })
 })

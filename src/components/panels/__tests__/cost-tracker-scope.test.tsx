@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { COST_SCOPE_NOTICE, COST_COVERAGE_TOOLTIP } from '@/lib/cost-display'
+import { COST_SCOPE_NOTICE, COST_COVERAGE_TOOLTIP, COST_UNAVAILABLE_PLACEHOLDER } from '@/lib/cost-display'
 
 vi.mock('next-intl', () => ({
   useTranslations: () => (key: string) => key,
@@ -27,7 +27,23 @@ import { CostTrackerPanel } from '../cost-tracker-panel'
  * `models` drives the coverage denominator. `claude-sonnet-4-5` is in the
  * pricing catalogue; `openclaw-cron-runtime` is not, so its tokens are unpriced.
  */
-function mockTokenApi(models: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>, totalCost: number) {
+type ServerCoverage = { pricedTokenPercent: number | null }
+
+/** The `coverage` envelope `/api/tokens` returns, filled in around the one field under test. */
+function serverCoverage(pricedTokenPercent: number | null) {
+  return {
+    sourceRecords: { database: 1, manual: 0, sessionSnapshots: 0 },
+    billedCost: 0, estimatedCost: 0, excludedReportedRecords: 0,
+    pricedTokenPercent, unknownCostTokens: 0, excludedSnapshots: 0,
+    unavailableSources: [] as string[], unattributedTokens: 0,
+  }
+}
+
+function mockTokenApi(
+  models: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>,
+  totalCost: number,
+  coverage?: ServerCoverage,
+) {
   const totalTokens = Object.values(models).reduce((sum, m) => sum + m.totalTokens, 0)
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.includes('by-agent')) {
@@ -44,6 +60,7 @@ function mockTokenApi(models: Record<string, { totalTokens: number; totalCost: n
       json: async () => ({
         summary: { totalTokens, totalCost, requestCount: 1, avgTokensPerRequest: totalTokens, avgCostPerRequest: totalCost },
         models, sessions: {}, timeframe: 'day', recordCount: 1,
+        ...(coverage ? { coverage: serverCoverage(coverage.pricedTokenPercent) } : {}),
       }),
     } as Response
   }))
@@ -103,5 +120,58 @@ describe('CostTrackerPanel coverage gating', () => {
       expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/no priced coverage can be computed/)
     })
     expect(screen.queryAllByText(/\$\d/)).toHaveLength(0)
+  })
+})
+
+
+/**
+ * The server already measures priced coverage over the same ledger, with a fuller
+ * view of which records carry a known price than the model breakdown alone gives.
+ * When `/api/tokens` reports it, the panel must use that number rather than
+ * recomputing a weaker one on the client.
+ */
+describe('CostTrackerPanel server-reported coverage', () => {
+  const slivers = {
+    'claude-sonnet-4-5': { totalTokens: 3_336, totalCost: 1.25, requestCount: 1 },
+    'openclaw-cron-runtime': { totalTokens: 2_406_664, totalCost: 0, requestCount: 1 },
+  }
+
+  it('uses coverage.pricedTokenPercent from the API instead of the client computation', async () => {
+    // Client-side the breakdown is 0.1 % priced; the server says 90 %.
+    mockTokenApi(slivers, 1.25, { pricedTokenPercent: 90 })
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 90 %/)
+    })
+    expect(screen.getAllByText('$1.2500').length).toBeGreaterThan(0)
+    expect(screen.queryAllByTitle(COST_COVERAGE_TOOLTIP)).toHaveLength(0)
+  })
+
+  it('gates on the server number when the server reports low coverage', async () => {
+    // Inverted: the client breakdown would allow the amounts, the server says no.
+    mockTokenApi(
+      { 'claude-sonnet-4-5': { totalTokens: 1_000, totalCost: 1.25, requestCount: 1 } },
+      1.25,
+      { pricedTokenPercent: 4 },
+    )
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 4 %/)
+    })
+    const withheld = screen.getAllByTitle(COST_COVERAGE_TOOLTIP)
+    expect(withheld.length).toBeGreaterThan(0)
+    expect(withheld[0]).toHaveTextContent(COST_UNAVAILABLE_PLACEHOLDER)
+  })
+
+  it('falls back to the client computation when the API sends no coverage envelope', async () => {
+    mockTokenApi(slivers, 1.25)
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
+    })
+    expect(screen.getAllByTitle(COST_COVERAGE_TOOLTIP).length).toBeGreaterThan(0)
   })
 })

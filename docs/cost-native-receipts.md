@@ -104,8 +104,8 @@ email or account id — the cost surface is rendered in a browser.
 |---|---|
 | `src/lib/migrations.ts` | new migration: `cost_observations` table, or `source` + `account_ref` + `price_basis` columns on `token_usage` |
 | `src/lib/token-pricing.ts` | `hasCatalogPrice()` already lands on `mc-improve/ui-scope`; add a `priceBasis()` that returns the enum rather than a boolean |
-| `src/app/api/tokens/route.ts` | read observations alongside `token_usage`; return real `pricedTokens` / `totalTokens` rather than leaving the panel to derive coverage from the model breakdown |
-| `src/lib/cost-display.ts` | `computePricedCoverage` takes the server's counts directly; the model-breakdown derivation becomes the fallback |
+| `src/app/api/tokens/route.ts` | read observations alongside `token_usage`; `coverage.pricedTokenPercent` (already returned, from `src/lib/token-ledger.ts`) gains the native sources instead of covering only the cron ledger |
+| `src/lib/cost-display.ts` | **done** — `resolveDisplayCoverage()` already prefers the server's `coverage.pricedTokenPercent` and keeps the model-breakdown derivation as the fallback |
 | `src/components/panels/cost-tracker-panel.tsx` | scope label narrows per source instead of the blanket "cron tokens only" |
 | new ingest module | converts a finished native session into observations |
 
@@ -115,13 +115,18 @@ email or account id — the cost surface is rendered in a browser.
    and check whether a token count can be recovered per session at all, and how
    it compares to the provider's own reporting. If it cannot, the rest is moot
    and the scope label stays as the honest answer.
-2. Add `price_basis` (a rename of a distinction that already exists in code) and
-   make `/api/tokens` return the priced/total split, so the display gate stops
-   deriving coverage client-side.
+2. **Done, in part.** `/api/tokens` already returns the priced/total split as
+   `coverage.pricedTokenPercent`, and the display gate now reads it via
+   `resolveDisplayCoverage()` instead of deriving coverage client-side. What
+   remains of this step is `price_basis` itself — a name for a distinction the
+   code already makes, but does not yet record per record.
 3. Only then add `source` and `account_ref` and an ingest path.
 
-Step 2 is worth doing on its own. Steps 1 and 3 are not worth starting until
-step 1 answers yes.
+Step 3 is not worth starting until step 1 answers yes. Note that finishing
+step 2 does **not** improve the measured number on its own: the server's
+coverage is computed over the same cron ledger, so it reports the same ~0.1 %
+until step 1 and step 3 give it something else to count. The gain is that there
+is one definition of coverage instead of two.
 
 ## What must not happen
 

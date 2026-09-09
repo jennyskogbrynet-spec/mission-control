@@ -12,6 +12,7 @@ import {
   COST_COVERAGE_TOOLTIP,
   COST_UNAVAILABLE_PLACEHOLDER,
   computePricedCoverage,
+  resolveDisplayCoverage,
   isCostDisplayable,
   formatGatedCost,
 } from '@/lib/cost-display'
@@ -240,9 +241,13 @@ export function CostTrackerPanel() {
     ),
     [usageStats],
   )
-  const coveragePercent = pricedCoverage.coverage === null
+  // The server measures this too, and measures it better. Its number wins; the
+  // client computation above is the fallback for a payload without a coverage
+  // envelope. See resolveDisplayCoverage for why null is not the same as absent.
+  const displayCoverage = resolveDisplayCoverage(usageStats?.coverage?.pricedTokenPercent, pricedCoverage)
+  const coveragePercent = displayCoverage.coverage === null
     ? null
-    : Math.round(pricedCoverage.coverage * 1000) / 10
+    : Math.round(displayCoverage.coverage * 1000) / 10
 
   // Derived data
   const summary = usageStats?.summary
@@ -258,7 +263,7 @@ export function CostTrackerPanel() {
   }
 
   return (
-    <CostCoverageContext.Provider value={pricedCoverage.coverage}>
+    <CostCoverageContext.Provider value={displayCoverage.coverage}>
     <div className="p-6 space-y-6">
       {/* Header */}
       <div className="border-b border-border pb-4">
@@ -307,7 +312,7 @@ export function CostTrackerPanel() {
           {coveragePercent === null
             ? 'No token records in this timeframe, so no priced coverage can be computed. Amounts are withheld.'
             : `Priced coverage: ${coveragePercent} % of ${formatNumber(pricedCoverage.totalTokens)} tokens have a catalogue price.${
-                isCostDisplayable(pricedCoverage.coverage)
+                isCostDisplayable(displayCoverage.coverage)
                   ? ''
                   : ' Dollar amounts are withheld below 50 % — the remainder would be priced at a default rate, not a known one.'
               }`}
