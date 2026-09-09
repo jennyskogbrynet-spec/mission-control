@@ -16,8 +16,21 @@ Two different problems produced that number, and they need different fixes:
 
 1. **Unknown prices are silently guessed.** Partly addressed on branch
    `mc-improve/ui-scope`: `hasCatalogPrice()` now separates a known price from
-   the fallback, and `src/lib/cost-display.ts` withholds amounts below 50 %
-   priced coverage instead of rendering a guess.
+   the fallback, and `src/lib/cost-display.ts` withholds guessed amounts instead
+   of rendering them.
+
+   That withholding applies at **two layers, with two rules** (ruled
+   2026-09-09). An *aggregate* — a total, a sum, a "this week" figure, or a
+   share computed across rows such as an agent's `% of known cost` — is backed
+   by the whole ledger, so it inherits the whole ledger's priced coverage and is
+   withheld below `COST_DISPLAY_MIN_COVERAGE` (50 %). A *row* — one model,
+   agent, session or task — is shown whenever that row itself carries a
+   catalogue price, and withheld only when it does not. A ledger-wide statistic
+   is not evidence about a single row: gating rows on it hid amounts that were
+   already honest and, at the measured 0.14 % coverage, left every figure on the
+   panel an em dash. The two withheld states are visually distinct, because
+   "this row has no price" and "the ledger is barely priced" are different
+   claims — see `COST_ROW_UNPRICED_TOOLTIP` versus `COST_COVERAGE_TOOLTIP`.
 2. **The population is the wrong one.** The ledger is fed by OpenClaw cron runs.
    The native subscription workers — Claude Code and Codex — do the bulk of the
    actual work and write nothing into it. This is the part this note is about,
@@ -116,8 +129,10 @@ email or account id — the cost surface is rendered in a browser.
    it compares to the provider's own reporting. If it cannot, the rest is moot
    and the scope label stays as the honest answer.
 2. **Done, in part.** `/api/tokens` already returns the priced/total split as
-   `coverage.pricedTokenPercent`, and the display gate now reads it via
-   `resolveDisplayCoverage()` instead of deriving coverage client-side. What
+   `coverage.pricedTokenPercent`, and the aggregate display gate now reads it via
+   `resolveDisplayCoverage()` instead of deriving coverage client-side. Per-row
+   amounts do not consult it at all; they read the row's own
+   `describeUsageCost(...).hasKnownCost`. What
    remains of this step is `price_basis` itself — a name for a distinction the
    code already makes, but does not yet record per record.
 3. Only then add `source` and `account_ref` and an ingest path.

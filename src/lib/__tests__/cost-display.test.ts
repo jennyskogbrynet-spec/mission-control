@@ -3,11 +3,13 @@ import {
   COST_DISPLAY_MIN_COVERAGE,
   COST_SCOPE_NOTICE,
   COST_COVERAGE_TOOLTIP,
+  COST_ROW_UNPRICED_TOOLTIP,
   COST_UNAVAILABLE_PLACEHOLDER,
   computePricedCoverage,
   resolveDisplayCoverage,
-  isCostDisplayable,
-  formatGatedCost,
+  isAggregateCostDisplayable,
+  isRowCostDisplayable,
+  formatAggregateCost,
 } from '../cost-display'
 
 const usd = (value: number) => '$' + value.toFixed(4)
@@ -55,7 +57,7 @@ describe('computePricedCoverage', () => {
       { model: 'openclaw-unpriced-runtime', totalTokens: 2_410_000 - 3_336 },
     ])
     expect(result.coverage).toBeLessThan(COST_DISPLAY_MIN_COVERAGE)
-    expect(isCostDisplayable(result.coverage)).toBe(false)
+    expect(isAggregateCostDisplayable(result.coverage)).toBe(false)
   })
 
   it('ignores negative and non-finite token counts instead of trusting them', () => {
@@ -68,36 +70,36 @@ describe('computePricedCoverage', () => {
   })
 })
 
-describe('isCostDisplayable', () => {
+describe('isAggregateCostDisplayable', () => {
   it('is false when coverage is unknown', () => {
-    expect(isCostDisplayable(null)).toBe(false)
-    expect(isCostDisplayable(undefined)).toBe(false)
+    expect(isAggregateCostDisplayable(null)).toBe(false)
+    expect(isAggregateCostDisplayable(undefined)).toBe(false)
   })
 
   it('is false below the threshold and true at or above it', () => {
-    expect(isCostDisplayable(0.4999)).toBe(false)
-    expect(isCostDisplayable(COST_DISPLAY_MIN_COVERAGE)).toBe(true)
-    expect(isCostDisplayable(0.9)).toBe(true)
+    expect(isAggregateCostDisplayable(0.4999)).toBe(false)
+    expect(isAggregateCostDisplayable(COST_DISPLAY_MIN_COVERAGE)).toBe(true)
+    expect(isAggregateCostDisplayable(0.9)).toBe(true)
   })
 })
 
-describe('formatGatedCost', () => {
+describe('formatAggregateCost', () => {
   it('renders the placeholder, not a number, when coverage is below the threshold', () => {
-    expect(formatGatedCost(0.00024, 0.0014, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
+    expect(formatAggregateCost(0.00024, 0.0014, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
     expect(COST_UNAVAILABLE_PLACEHOLDER).toBe('—')
   })
 
   it('renders the placeholder when coverage is unknown', () => {
-    expect(formatGatedCost(12.5, null, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
+    expect(formatAggregateCost(12.5, null, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
   })
 
   it('renders the formatted amount once coverage is good enough', () => {
-    expect(formatGatedCost(12.5, 0.8, usd)).toBe('$12.5000')
+    expect(formatAggregateCost(12.5, 0.8, usd)).toBe('$12.5000')
   })
 
   it('gates a zero cost too — an unmeasured zero is not a measured zero', () => {
-    expect(formatGatedCost(0, 0.1, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
-    expect(formatGatedCost(0, 0.8, usd)).toBe('$0.0000')
+    expect(formatAggregateCost(0, 0.1, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
+    expect(formatAggregateCost(0, 0.8, usd)).toBe('$0.0000')
   })
 })
 
@@ -120,7 +122,7 @@ describe('resolveDisplayCoverage', () => {
     const resolved = resolveDisplayCoverage(90, clientCoverage)
     expect(resolved.source).toBe('server')
     expect(resolved.coverage).toBeCloseTo(0.9, 10)
-    expect(isCostDisplayable(resolved.coverage)).toBe(true)
+    expect(isAggregateCostDisplayable(resolved.coverage)).toBe(true)
   })
 
   it('treats an explicit null from the server as a measured "no usage", not as absence', () => {
@@ -130,7 +132,7 @@ describe('resolveDisplayCoverage', () => {
     const resolved = resolveDisplayCoverage(null, clientCoverage)
     expect(resolved.source).toBe('server')
     expect(resolved.coverage).toBeNull()
-    expect(isCostDisplayable(resolved.coverage)).toBe(false)
+    expect(isAggregateCostDisplayable(resolved.coverage)).toBe(false)
   })
 
   it('falls back to the client computation when the server field is absent', () => {
@@ -152,6 +154,42 @@ describe('resolveDisplayCoverage', () => {
   it('still gates when the server reports coverage below the threshold', () => {
     const resolved = resolveDisplayCoverage(0.14, clientCoverage)
     expect(resolved.coverage).toBeCloseTo(0.0014, 10)
-    expect(formatGatedCost(0.00024, resolved.coverage, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
+    expect(formatAggregateCost(0.00024, resolved.coverage, usd)).toBe(COST_UNAVAILABLE_PLACEHOLDER)
+  })
+})
+
+
+/**
+ * The coverage gate governs AGGREGATES. A per-row amount answers a narrower
+ * question — what did THIS model / agent / session / task cost — and a
+ * ledger-wide statistic is not evidence about that row. The two predicates are
+ * kept apart by their signatures: the row one cannot be handed a coverage
+ * number, and the aggregate one cannot be handed a row.
+ */
+describe('isRowCostDisplayable', () => {
+  it('shows a row that carries its own catalogue price', () => {
+    expect(isRowCostDisplayable(true)).toBe(true)
+  })
+
+  it('withholds a row whose own price is unknown', () => {
+    expect(isRowCostDisplayable(false)).toBe(false)
+    expect(isRowCostDisplayable(null)).toBe(false)
+    expect(isRowCostDisplayable(undefined)).toBe(false)
+  })
+
+  it('does not consult panel coverage: a priced row survives a barely-priced ledger', () => {
+    const ledger = computePricedCoverage([
+      { model: 'claude-sonnet-4-5', totalTokens: 3_336 },
+      { model: 'openclaw-cron-runtime', totalTokens: 2_406_664 },
+    ])
+    expect(isAggregateCostDisplayable(ledger.coverage)).toBe(false)
+    expect(isRowCostDisplayable(true)).toBe(true)
+  })
+})
+
+describe('COST_ROW_UNPRICED_TOOLTIP', () => {
+  it('gives the row-level reason, which is not the aggregate one', () => {
+    expect(COST_ROW_UNPRICED_TOOLTIP).toBe('No catalogue price for this row')
+    expect(COST_ROW_UNPRICED_TOOLTIP).not.toBe(COST_COVERAGE_TOOLTIP)
   })
 })

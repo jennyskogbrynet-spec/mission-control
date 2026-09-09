@@ -1,6 +1,11 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { COST_SCOPE_NOTICE, COST_COVERAGE_TOOLTIP, COST_UNAVAILABLE_PLACEHOLDER } from '@/lib/cost-display'
+import {
+  COST_SCOPE_NOTICE,
+  COST_COVERAGE_TOOLTIP,
+  COST_ROW_UNPRICED_TOOLTIP,
+  COST_UNAVAILABLE_PLACEHOLDER,
+} from '@/lib/cost-display'
 
 vi.mock('next-intl', () => ({
   useTranslations: () => (key: string) => key,
@@ -39,10 +44,21 @@ function serverCoverage(pricedTokenPercent: number | null) {
   }
 }
 
+/** One agent row as `/api/tokens` returns it inside `agentBreakdown`. */
+function agentRow(agent: string, totalTokens: number, totalCost: number, pricedTokens: number, pricedRecordCount: number) {
+  return {
+    agent, total_tokens: totalTokens, total_cost: totalCost,
+    total_input_tokens: totalTokens, total_output_tokens: 0,
+    session_count: 1, request_count: 1, last_active: '2026-09-09T00:00:00Z',
+    models: [], pricing: { pricedTokens, pricedRecordCount },
+  }
+}
+
 function mockTokenApi(
   models: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>,
   totalCost: number,
   coverage?: ServerCoverage,
+  agentBreakdown?: unknown,
 ) {
   const totalTokens = Object.values(models).reduce((sum, m) => sum + m.totalTokens, 0)
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -60,6 +76,7 @@ function mockTokenApi(
       json: async () => ({
         summary: { totalTokens, totalCost, requestCount: 1, avgTokensPerRequest: totalTokens, avgCostPerRequest: totalCost },
         models, sessions: {}, timeframe: 'day', recordCount: 1,
+        ...(agentBreakdown ? { agentBreakdown } : {}),
         ...(coverage ? { coverage: serverCoverage(coverage.pricedTokenPercent) } : {}),
       }),
     } as Response
@@ -80,7 +97,7 @@ describe('CostTrackerPanel scope label', () => {
 })
 
 describe('CostTrackerPanel coverage gating', () => {
-  it('withholds dollar amounts when priced coverage is below the threshold', async () => {
+  it('withholds the aggregate total when priced coverage is below the threshold', async () => {
     // The measured 2026-09-09 shape: a sliver of priced tokens in a large ledger.
     mockTokenApi({
       'claude-sonnet-4-5': { totalTokens: 3_336, totalCost: 0.00024, requestCount: 1 },
@@ -91,11 +108,12 @@ describe('CostTrackerPanel coverage gating', () => {
     await waitFor(() => {
       expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
     })
-    // No dollar figure anywhere, and the withheld amounts explain themselves.
-    expect(screen.queryAllByText(/\$\d/)).toHaveLength(0)
+    // The summed figure is the one the sparse ledger cannot back.
     const withheld = screen.getAllByTitle(COST_COVERAGE_TOOLTIP)
     expect(withheld.length).toBeGreaterThan(0)
-    expect(withheld[0]).toHaveTextContent('—')
+    expect(withheld[0]).toHaveTextContent(COST_UNAVAILABLE_PLACEHOLDER)
+    expect(screen.getByText('totalCost')).toBeInTheDocument()
+    expect(screen.getByText('totalCost').parentElement).toHaveTextContent(COST_UNAVAILABLE_PLACEHOLDER)
   })
 
   it('shows the amounts once the ledger is mostly catalogue-priced', async () => {
@@ -173,5 +191,115 @@ describe('CostTrackerPanel server-reported coverage', () => {
       expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
     })
     expect(screen.getAllByTitle(COST_COVERAGE_TOOLTIP).length).toBeGreaterThan(0)
+  })
+})
+
+
+/**
+ * Ruling 2026-09-09: the coverage gate governs AGGREGATES — totals, sums,
+ * "this week" figures and shares computed across rows. A single row's own
+ * amount is a narrower claim, and it stands or falls on that row's own
+ * catalogue price. Withholding it because the rest of the ledger is unpriced
+ * removes decision support the snapshot's per-row layer already earned.
+ */
+describe('CostTrackerPanel per-row amounts under a low aggregate coverage', () => {
+  // 0.1 % priced ledger-wide, but the claude row itself has a known cost.
+  const sparseLedger = {
+    'claude-sonnet-4-5': { totalTokens: 3_336, totalCost: 0.5, requestCount: 1 },
+    'openclaw-cron-runtime': { totalTokens: 2_406_664, totalCost: 0, requestCount: 1 },
+  }
+
+  it('shows a row that has a catalogue price while the total stays withheld', async () => {
+    mockTokenApi(sparseLedger, 0.5)
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
+    })
+    // Row: 0.5 USD over 3 336 priced tokens = $0.1499 per 1K. Rendered, not hidden.
+    const pricedRow = screen.getByText('$0.1499/1K')
+    expect(pricedRow).toBeInTheDocument()
+    expect(pricedRow).not.toHaveAttribute('title', COST_COVERAGE_TOOLTIP)
+    // Aggregate: withheld, for the ledger-wide reason.
+    expect(screen.getByText('totalCost').parentElement).toHaveTextContent(COST_UNAVAILABLE_PLACEHOLDER)
+  })
+
+  it('withholds a row whose own price is unknown, with the row-level reason', async () => {
+    mockTokenApi(sparseLedger, 0.5)
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
+    })
+    const unpricedRow = screen.getByText('openclaw-cron-runtime').parentElement!
+    // The row-level placeholder says which of the two reasons applies. It is
+    // deliberately not the aggregate em dash: "this row has no price" and "the
+    // ledger is barely priced" are different statements about different things.
+    expect(within(unpricedRow).getByTitle(COST_ROW_UNPRICED_TOOLTIP)).toBeInTheDocument()
+    expect(within(unpricedRow).queryAllByTitle(COST_COVERAGE_TOOLTIP)).toHaveLength(0)
+    expect(unpricedRow).not.toHaveTextContent('$')
+  })
+
+  it('shows both layers once the ledger is mostly catalogue-priced', async () => {
+    mockTokenApi({
+      'claude-sonnet-4-5': { totalTokens: 900, totalCost: 1.25, requestCount: 1 },
+      'openclaw-cron-runtime': { totalTokens: 100, totalCost: 0, requestCount: 1 },
+    }, 1.25)
+    render(<CostTrackerPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 90 %/)
+    })
+    expect(screen.getByText('totalCost').parentElement).toHaveTextContent('$1.2500')
+    expect(screen.getByText('$1.3889/1K')).toBeInTheDocument()
+    expect(screen.queryAllByTitle(COST_COVERAGE_TOOLTIP)).toHaveLength(0)
+  })
+})
+
+/**
+ * `costShare` is a percentage of the summed known cost, so it is computed
+ * ACROSS rows and gates with the other aggregates — even though the row it sits
+ * next to keeps its own amount.
+ */
+describe('CostTrackerPanel cross-row cost share', () => {
+  const agentBreakdown = {
+    agents: [
+      agentRow('main', 3_336, 0.5, 3_336, 1),
+      agentRow('cron', 2_406_664, 0, 0, 0),
+    ],
+    summary: {
+      total_cost: 0.5, total_tokens: 2_410_000, agent_count: 2, days: 1,
+      pricing: { pricedTokens: 3_336, pricedRecordCount: 1 },
+    },
+  }
+  const sparseLedger = {
+    'claude-sonnet-4-5': { totalTokens: 3_336, totalCost: 0.5, requestCount: 1 },
+    'openclaw-cron-runtime': { totalTokens: 2_406_664, totalCost: 0, requestCount: 1 },
+  }
+
+  it('withholds the share at low coverage while the agent row keeps its amount', async () => {
+    mockTokenApi(sparseLedger, 0.5, undefined, agentBreakdown)
+    render(<CostTrackerPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 0\.1 %/)
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Agents$/ }))
+
+    const mainRow = await screen.findByRole('button', { name: /^main / })
+    expect(within(mainRow).getByText('$0.5000')).toBeInTheDocument()
+    expect(within(mainRow).queryByText(/% of known cost/)).toBeNull()
+    expect(within(mainRow).getAllByTitle(COST_COVERAGE_TOOLTIP).length).toBeGreaterThan(0)
+  })
+
+  it('shows the share once the ledger is priced enough to back it', async () => {
+    mockTokenApi(sparseLedger, 0.5, { pricedTokenPercent: 90 }, agentBreakdown)
+    render(<CostTrackerPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('cost-scope-notice')).toHaveTextContent(/Priced coverage: 90 %/)
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Agents$/ }))
+
+    const mainRow = await screen.findByRole('button', { name: /^main / })
+    expect(within(mainRow).getByText('100.0% of known cost')).toBeInTheDocument()
   })
 })

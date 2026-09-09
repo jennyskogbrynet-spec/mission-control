@@ -62,7 +62,10 @@ it('preserves unknown, local zero and partial amounts through Sessions and Tasks
   expect(await screen.findByText('75%')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: /^Sessions$/ }))
   const unpricedSession = await screen.findByRole('group', { name: 'Session unpriced' })
-  expect(within(unpricedSession).getByText('Unknown')).toBeInTheDocument()
+  // Two withheld row values now: the session's own cost and its per-record rate.
+  // Both carry the row-level reason ("no catalogue price for this row"), which is
+  // a different statement from the panel-wide coverage gate.
+  expect(within(unpricedSession).getAllByText('Unknown')).toHaveLength(2)
   expect(unpricedSession).toHaveTextContent('Unknown avg/priced record')
   expect(within(screen.getByRole('group', { name: 'Session local' })).getAllByText('$0.0000')).toHaveLength(2)
   expect(within(screen.getByRole('group', { name: 'Session mixed' })).getByText('$0.0000140 (partial)')).toBeInTheDocument()
