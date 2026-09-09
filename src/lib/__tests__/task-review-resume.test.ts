@@ -788,6 +788,41 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       ])
     })
 
+    // MC1297's PASS observations were written before the wrapper recorded an
+    // exitCodeMeaning (journal worker 2cade99a…, pr438-review-3-pass.json). The
+    // field is descriptive only: its absence is recorded as null while every
+    // authoritative digest, identity, path and terminal check still runs.
+    it('accepts a historical observation without exitCodeMeaning and records the meaning as null', async () => {
+      const resultRef = nativeRun({ native: { decision: 'pass', review: { decision: 'pass' } } })
+      // `undefined` is dropped by JSON.stringify, so the key is absent, not empty.
+      const observation = hostObservation('mc1297', { exitCode: 0, decision: 'pass', exitCodeMeaning: undefined })
+      expect(JSON.parse(readFileSync(observation, 'utf8'))).not.toHaveProperty('exitCodeMeaning')
+      nativeJournal(observation)
+      seedTask()
+
+      const result = await resume({
+        reason: 'MC1297 historical PASS observation predates exitCodeMeaning',
+        expected_updated_at: 2000,
+      })
+
+      expect(result.status).toBe(200)
+      const [reconciled] = result.body.evidence.workers
+      expect(reconciled.native.evidence_kind).toBe('host_observation_of_native_release_review')
+      expect(reconciled.native.wrapper_exit_code).toBe(0)
+      expect(reconciled.native.wrapper_exit_meaning).toBeNull()
+      expect(reconciled.native.child_exit_code).toBe(0)
+      expect(reconciled.receipt_exit_code).toBe(0)
+      expect(reconciled.native.review_decision).toBe('pass')
+      // The strict checks still ran: both digests are of the exact raw bytes.
+      expect(reconciled.native.wrapper_digest).toBe(
+        createHash('sha256').update(readFileSync(observation)).digest('hex'),
+      )
+      expect(reconciled.native.result_digest).toBe(
+        createHash('sha256').update(readFileSync(resultRef)).digest('hex'),
+      )
+      expect(JSON.stringify(result.body.evidence)).not.toContain(root)
+    })
+
     it.each<[string, () => void]>([
       ['altered request bytes that decode to the same replacement character', () => {
         const ref = nativeRun({ request: { note: '\uFFFD' } }); const requestPath = path.join(path.dirname(ref), 'request.json');
@@ -982,7 +1017,7 @@ describe('POST /api/tasks/[id]/resume-review', () => {
         },
       ],
       [
-        'an observation with no exitCodeMeaning',
+        'an observation with an empty exitCodeMeaning',
         () => {
           nativeRun()
           nativeJournal(hostObservation('no-meaning', { exitCodeMeaning: '' }))

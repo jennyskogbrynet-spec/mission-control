@@ -148,7 +148,9 @@ following.
 
 Its `exitCode` is the **wrapper's decision exit** — the release CLI exits
 non-zero on HOLD. It is recorded as `wrapper_exit_code`/`wrapper_exit_meaning`
-and never substituted for the native child exit.
+and never substituted for the native child exit. `exitCodeMeaning` is
+descriptive and optional: MC1297's PASS observations predate it, and an absent
+value is recorded as `wrapper_exit_meaning: null`.
 
 ## What the evidence means
 

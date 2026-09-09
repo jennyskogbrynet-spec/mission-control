@@ -126,7 +126,9 @@ const hostObservationSchema = z
     kind: z.literal(HOST_OBSERVATION_KIND),
     status: z.string().min(1).max(32),
     exitCode: z.number().int(),
-    exitCodeMeaning: z.string().min(1).max(300),
+    // Descriptive only. MC1297's PASS observations predate the field, so its
+    // absence is recorded as null rather than refusing otherwise valid evidence.
+    exitCodeMeaning: z.string().min(1).max(300).nullish(),
     sessionRef: z.string().min(1).max(300),
     decision: z.enum(['pass', 'hold']),
     runId: uuid,
@@ -443,7 +445,7 @@ function readHostObservation(
     ...native,
     evidence_kind: HOST_OBSERVATION_KIND,
     wrapper_exit_code: observation.exitCode,
-    wrapper_exit_meaning: observation.exitCodeMeaning,
+    wrapper_exit_meaning: observation.exitCodeMeaning ?? null,
     wrapper_digest: rawDigest(receipt.raw),
   }
 }
