@@ -296,7 +296,7 @@ interface JournalWorker {
   accountIds: string[]
   profileRefs: string[]
   expectedPlanTypes: string[]
-  codexHomeSha256s: string[]
+  codexHomeSha256s: Array<string | null>
   runId: string | null
   journalFile: string
 }
@@ -394,7 +394,10 @@ export function reconcileNativeTerminalEvidence(
         accountIds: [worker.route?.accountId, worker.dispatch?.accountId].filter((v): v is string => typeof v === 'string'),
         profileRefs: [worker.route?.profileRef, worker.dispatch?.profileRef].filter((v): v is string => typeof v === 'string'),
         expectedPlanTypes: [worker.route?.expectedPlanType, worker.dispatch?.expectedPlanType].filter((v): v is string => typeof v === 'string'),
-        codexHomeSha256s: [worker.route?.codexHomeSha256, worker.dispatch?.codexHomeSha256].filter((v): v is string => typeof v === 'string'),
+        codexHomeSha256s: [worker.route, worker.dispatch].flatMap((binding) =>
+          binding && Object.prototype.hasOwnProperty.call(binding, 'codexHomeSha256')
+            ? [binding.codexHomeSha256 ?? null]
+            : []),
         runId: parsed.id ?? null,
         journalFile: name,
       })

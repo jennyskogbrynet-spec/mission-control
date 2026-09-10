@@ -112,6 +112,8 @@ flat receipt found *inside* the native root is rejected.
 
 Request and result `schemaVersion` must match exactly and be one of `1`, `2` or `3`. There is no downgrade or best-effort parser. Version 1 retains the historical completed/pass/HOLD contract. Versions 2 and 3 additionally bind `profileRef`, `expectedPlanType` and `codexHomeSha256` between request and result, and to every corresponding journal route/dispatch value that is supplied. Plus requires a SHA-256 home hash; Pro requires an explicit null home hash. A controller `bindingId` names the compute binding and is not treated as a profile reference. The registered account and model remain authoritative journal bindings.
 
+An explicitly supplied null home in either the journal route or dispatch is a binding, not an omitted field. It must match the request's home value. Contradictory bindings cannot recover a Plus review lifecycle; historical journals that omit the optional field retain their existing compatibility.
+
 All of the following must hold:
 
 - `sha256(raw request.json bytes) == result.requestSha256`

@@ -208,7 +208,7 @@ export interface NativeWorkerBinding {
   accountIds: string[]
   profileRefs: string[]
   expectedPlanTypes: string[]
-  codexHomeSha256s: string[]
+  codexHomeSha256s: Array<string | null>
 }
 
 const rawDigest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')

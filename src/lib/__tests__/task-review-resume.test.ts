@@ -297,6 +297,9 @@ function versionedCodexWorker(receiptRef: string, status = 'completed', sessionR
       accountId: 'fixture-account',
       runtimeId: 'codex-cli',
       modelId: NATIVE.model,
+      profileRef: NATIVE.profileRef,
+      expectedPlanType: NATIVE.expectedPlanType,
+      codexHomeSha256: NATIVE.codexHomeSha256,
     },
     dispatch: {
       type: 'dispatch',
@@ -306,6 +309,9 @@ function versionedCodexWorker(receiptRef: string, status = 'completed', sessionR
       bindingId: NATIVE.profileRef,
       modelId: NATIVE.model,
       hostModelId: NATIVE.model,
+      profileRef: NATIVE.profileRef,
+      expectedPlanType: NATIVE.expectedPlanType,
+      codexHomeSha256: NATIVE.codexHomeSha256,
     },
   }
 }
@@ -815,12 +821,38 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       const worker = versionedCodexWorker(ref)
       journal('001-run', {
         id: 'pro-run', projectId: PROJECT_ID, workspaceId: null,
-        workers: [{ ...worker, route: { ...worker.route, bindingId: 'codex-martin' } }],
+        workers: [{ ...worker,
+          route: { ...worker.route, bindingId: 'codex-martin', profileRef: 'codex-default',
+            expectedPlanType: 'pro', codexHomeSha256: null },
+          dispatch: { ...worker.dispatch, profileRef: 'codex-default',
+            expectedPlanType: 'pro', codexHomeSha256: null } }],
       })
       seedTask()
 
       expect((await resume({ reason: 'Pro route uses host default profile', expected_updated_at: 2000 })).status).toBe(200)
     })
+
+    it.each(['route', 'dispatch', 'both'] as const)(
+      'rejects a Plus receipt when the journal %s binding explicitly declares a null home',
+      async (nullBinding) => {
+      const ref = versionedNativeRun(2)
+      const worker = versionedCodexWorker(ref)
+      journal('001-run', {
+        id: 'home-binding-mismatch', projectId: PROJECT_ID, workspaceId: null,
+        workers: [{ ...worker,
+          route: { ...worker.route,
+            codexHomeSha256: ['route', 'both'].includes(nullBinding) ? null : NATIVE.codexHomeSha256 },
+          dispatch: { ...worker.dispatch,
+            codexHomeSha256: ['dispatch', 'both'].includes(nullBinding) ? null : NATIVE.codexHomeSha256 } }],
+      })
+      seedTask()
+
+      const result = await resume({ reason: 'journal home binding must be exact', expected_updated_at: 2000 })
+      expect(result.status).toBe(409)
+      expect(result.body.evidence_code).toBe('receipt_mismatch')
+      expect(taskRow().claim_state).toBe('Released')
+      },
+    )
 
     it.each([
       ['turn error', { terminal: { ...nativeBody().terminal, turn: { ...nativeBody().terminal.turn, error: { message: 'stream failed' } } } }],
