@@ -928,6 +928,24 @@ describe('POST /api/tasks/[id]/resume-review', () => {
 
     describe.each([2, 3] as const)('v%s child termination evidence', (version) => {
       it.each([
+        { observed: true, code: 0 },
+        { observed: true, signal: 'SIGTERM' },
+      ])('rejects omitted counterpart outcome fields %j', async (childExit) => {
+        const ref = versionedNativeRun(version, {
+          status: 'failed', decision: null, review: null, accountAfter: null,
+          terminal: null, errorCode: 'native_error', childLifecycle: { state: 'exited' }, childExit,
+        })
+        versionedNativeJournal(ref, 'failed')
+        seedTask()
+
+        const result = await resume({ reason: 'require explicit nullable exit fields', expected_updated_at: 2000 })
+
+        expect(result.status).toBe(409)
+        expect(result.body.evidence_code).toBe('receipt_mismatch')
+        expect(taskRow().claim_state).toBe('Released')
+      })
+
+      it.each([
         '', ' ', 'not-a-signal', 'SIGMADEUP', 'sigterm', 'SIGTERM ', 'constructor',
         '__proto__', null, undefined,
       ])('rejects a null exit code with invalid signal %j', async (signal) => {

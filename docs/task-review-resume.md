@@ -82,7 +82,7 @@ Resume is allowed only when **all** of the following hold:
   (`completed` ⇒ `0`, `failed`/`cancelled` ⇒ any integer exit code) and the same session
 - a passed `deadlineAt` is never treated as proof and is not read
 
-A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. The signal must be an own entry in the host operating system signal table. Empty, unknown and inherited property names are rejected. An unobserved exit, missing outcome, or simultaneous code and signal remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
+A failed worker with an actual safe integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. Both `code` and `signal` fields must be present; the unused field must be explicitly null. The signal must be an own entry in the host operating system signal table. Empty, unknown and inherited property names are rejected. An unobserved exit, missing outcome, or simultaneous code and signal remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
 
 ## Receipt shapes
 

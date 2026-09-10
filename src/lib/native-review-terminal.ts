@@ -123,8 +123,8 @@ const nativeResultSchema = z
         childExit: z
           .object({
             observed: z.boolean(),
-            code: z.number().int().nullish(),
-            signal: z.string().nullish(),
+            code: z.number().int().nullable(),
+            signal: z.string().nullable(),
           })
           .passthrough(),
         errorCode: z.string().max(200).nullish(),
@@ -331,8 +331,8 @@ function readNativeResult(
   // integer code or the actual signal. It may never report neither.
   const childExit = native.childExit
   if (childExit.observed !== true) throw new Error('native child exit was not observed')
-  const exitCode = childExit.code ?? null
-  const exitSignal = childExit.signal ?? null
+  const exitCode = childExit.code
+  const exitSignal = childExit.signal
   if (exitCode === null && exitSignal === null) throw new Error('native child exit outcome is missing')
   if (exitSignal !== null) {
     if (!Object.prototype.hasOwnProperty.call(constants.signals, exitSignal)) {
