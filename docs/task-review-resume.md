@@ -82,7 +82,7 @@ Resume is allowed only when **all** of the following hold:
   (`completed` ⇒ `0`, `failed`/`cancelled` ⇒ any integer exit code) and the same session
 - a passed `deadlineAt` is never treated as proof and is not read
 
-A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. An unobserved exit, or an observed exit with both code and signal null, remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
+A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. The signal must be an own entry in the host operating system signal table. Empty, unknown and inherited property names are rejected. An unobserved exit, missing outcome, or simultaneous code and signal remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
 
 ## Receipt shapes
 
@@ -126,7 +126,7 @@ All of the following must hold:
 - `native.sourceThreadId == native.reviewThreadId == native.terminal.threadId`,
   and the registered worker `sessionRef` binds that thread id
 - completed results require `native.turnId == native.terminal.turn.id`, notification `turn/completed`, mechanism `turn/start+outputSchema`, and a completed turn. A version 2 or 3 operational failure may omit `terminal`; if present it must still match the exact source thread and turn.
-- `native.childExit.observed == true`; completed results and all version 1 results require an integer code and null signal. Version 2 and 3 failed/cancelled results may carry an integer code or an actual signal with nullable code. Neither may be absent together.
+- `native.childExit.observed == true`; completed results and all version 1 results require an integer code and null signal. Version 2 and 3 failed/cancelled results may carry an integer code or an actual signal with nullable code. Exactly one outcome must be present; a signal must exist in the host operating system signal table.
 - `native.status` is terminal and equals the journal worker status, except native `timeout` maps only to controller `failed` and remains `timeout` in provenance. Completed requires exit code `0` and no signal.
 - completed and version 1 results require `native.errorCode == null`. A version 2 or 3 operational failure requires an error code and `childLifecycle.state == "exited"`. No result may report leaving review mode.
 - `gitBefore`/`gitAfter` are clean and equal `request.candidate.headSha/treeSha`;

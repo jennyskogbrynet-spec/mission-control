@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { constants } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
 
@@ -333,6 +334,12 @@ function readNativeResult(
   const exitCode = childExit.code ?? null
   const exitSignal = childExit.signal ?? null
   if (exitCode === null && exitSignal === null) throw new Error('native child exit outcome is missing')
+  if (exitSignal !== null) {
+    if (!Object.prototype.hasOwnProperty.call(constants.signals, exitSignal)) {
+      throw new Error('native child exit signal is not a supported operating-system signal')
+    }
+    if (exitCode !== null) throw new Error('native child exit reports both a code and a signal')
+  }
   if (result.schemaVersion === 1 && (exitCode === null || exitSignal !== null)) {
     throw new Error('v1 native child exit requires an integer code and no signal')
   }

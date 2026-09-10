@@ -926,6 +926,60 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       },
     )
 
+    describe.each([2, 3] as const)('v%s child termination evidence', (version) => {
+      it.each([
+        '', ' ', 'not-a-signal', 'SIGMADEUP', 'sigterm', 'SIGTERM ', 'constructor',
+        '__proto__', null, undefined,
+      ])('rejects a null exit code with invalid signal %j', async (signal) => {
+        const ref = versionedNativeRun(version, {
+          status: 'failed', decision: null, review: null, accountAfter: null,
+          terminal: null, errorCode: 'native_error', childLifecycle: { state: 'exited' },
+          childExit: { observed: true, code: null, signal },
+        })
+        versionedNativeJournal(ref, 'failed')
+        seedTask()
+
+        const result = await resume({ reason: 'require real termination evidence', expected_updated_at: 2000 })
+
+        expect(result.status).toBe(409)
+        expect(result.body.evidence_code).toBe('receipt_mismatch')
+        expect(taskRow().claim_state).toBe('Released')
+      })
+
+      it.each(['SIGTERM', 'SIGKILL', 'SIGINT'])('preserves an observed %s termination', async (signal) => {
+        const ref = versionedNativeRun(version, {
+          status: 'failed', decision: null, review: null, accountAfter: null,
+          terminal: null, errorCode: 'native_error', childLifecycle: { state: 'exited' },
+          childExit: { observed: true, code: null, signal },
+        })
+        versionedNativeJournal(ref, 'failed')
+        seedTask()
+
+        const result = await resume({ reason: 'preserve observed termination', expected_updated_at: 2000 })
+
+        expect(result.status).toBe(200)
+        expect(result.body.evidence.workers[0].native).toMatchObject({
+          review_decision: null, child_exit_code: null, child_exit_signal: signal,
+        })
+      })
+
+      it.each(['SIGTERM', '', 'not-a-signal'])('rejects a code accompanied by signal %j', async (signal) => {
+        const ref = versionedNativeRun(version, {
+          status: 'failed', decision: null, review: null, accountAfter: null,
+          terminal: null, errorCode: 'native_error', childLifecycle: { state: 'exited' },
+          childExit: { observed: true, code: 0, signal },
+        })
+        versionedNativeJournal(ref, 'failed')
+        seedTask()
+
+        const result = await resume({ reason: 'reject contradictory exit outcomes', expected_updated_at: 2000 })
+
+        expect(result.status).toBe(409)
+        expect(result.body.evidence_code).toBe('receipt_mismatch')
+        expect(taskRow().claim_state).toBe('Released')
+      })
+    })
+
     it.each<[string, (ref: string) => string]>([
       ['schema mismatch', (ref) => { const value = JSON.parse(readFileSync(ref, 'utf8')); value.schemaVersion = 3; writeFileSync(ref, JSON.stringify(value)); return ref }],
       ['wrong profile binding', () => failedVersionedRun({ profileRef: 'codex-attacker' })],
