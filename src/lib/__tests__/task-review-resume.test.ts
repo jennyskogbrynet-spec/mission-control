@@ -115,6 +115,9 @@ const NATIVE = {
   emailHash: 'a'.repeat(64),
   model: 'gpt-6-astra',
   session: 'codex:01a08637-2625-7303-a89d-d8ca60674696',
+  profileRef: 'codex-fixture-plus',
+  expectedPlanType: 'plus',
+  codexHomeSha256: 'b'.repeat(64),
 }
 
 function nativeRequestBody(pr: number, runId: string) {
@@ -206,6 +209,49 @@ function nativeRun(options: NativeRunOptions = {}): string {
   return resultPath
 }
 
+function versionedNativeRun(
+  schemaVersion: 2 | 3,
+  nativeOverrides: Record<string, unknown> = {},
+  requestOverrides: Record<string, unknown> = {},
+): string {
+  return nativeRun({
+    request: {
+      schemaVersion,
+      profileRef: NATIVE.profileRef,
+      expectedPlanType: NATIVE.expectedPlanType,
+      codexHomeSha256: NATIVE.codexHomeSha256,
+      ...requestOverrides,
+    },
+    result: { schemaVersion },
+    native: {
+      profileRef: NATIVE.profileRef,
+      expectedPlanType: NATIVE.expectedPlanType,
+      codexHomeSha256: NATIVE.codexHomeSha256,
+      accountBefore: { type: 'chatgpt', emailHash: NATIVE.emailHash, planType: NATIVE.expectedPlanType },
+      accountAfter: { type: 'chatgpt', emailHash: NATIVE.emailHash, planType: NATIVE.expectedPlanType },
+      childLifecycle: { state: 'exited' },
+      ...nativeOverrides,
+    },
+  })
+}
+
+function failedVersionedRun(
+  nativeOverrides: Record<string, unknown> = {},
+  requestOverrides: Record<string, unknown> = {},
+): string {
+  return versionedNativeRun(2, {
+    status: 'failed',
+    decision: null,
+    review: null,
+    accountAfter: null,
+    terminal: null,
+    errorCode: 'native_error',
+    childLifecycle: { state: 'exited' },
+    childExit: { observed: true, code: 0, signal: null },
+    ...nativeOverrides,
+  }, requestOverrides)
+}
+
 /** Mirrors the derived host_observation_of_native_release_review summary under ~/tmp. */
 function hostObservation(name: string, overrides: Record<string, unknown> = {}, resultRef?: string) {
   return receipt(name, {
@@ -241,6 +287,36 @@ function codexWorker(receiptRef: string, status = 'completed', sessionRef = NATI
     sessionRef,
     receiptRef,
   }
+}
+
+function versionedCodexWorker(receiptRef: string, status = 'completed', sessionRef = NATIVE.session) {
+  return {
+    ...codexWorker(receiptRef, status, sessionRef),
+    route: {
+      bindingId: NATIVE.profileRef,
+      accountId: 'fixture-account',
+      runtimeId: 'codex-cli',
+      modelId: NATIVE.model,
+    },
+    dispatch: {
+      type: 'dispatch',
+      workerId: 'w-native-review',
+      taskId: TASK_ID,
+      phase: 'review',
+      bindingId: NATIVE.profileRef,
+      modelId: NATIVE.model,
+      hostModelId: NATIVE.model,
+    },
+  }
+}
+
+function versionedNativeJournal(receiptRef: string, status = 'completed', sessionRef = NATIVE.session) {
+  journal('001-run', {
+    id: '2fb27d2d-6d6c-41eb-9e8d-7308b6057867',
+    projectId: PROJECT_ID,
+    workspaceId: null,
+    workers: [versionedCodexWorker(receiptRef, status, sessionRef)],
+  })
 }
 
 function nativeJournal(receiptRef: string, status = 'completed', sessionRef = NATIVE.session) {
@@ -705,6 +781,144 @@ describe('POST /api/tasks/[id]/resume-review', () => {
   // integrator writes a derived summary that points at it. Neither may be
   // rewritten into the older flat shape to make a resume pass.
   describe('native Codex review receipts', () => {
+    it.each([2, 3] as const)('accepts a completed v%s result with exact route bindings', async (version) => {
+      versionedNativeJournal(versionedNativeRun(version))
+      seedTask()
+
+      const result = await resume({ reason: `completed v${version} lifecycle`, expected_updated_at: 2000 })
+
+      expect(result.status).toBe(200)
+      expect(result.body.evidence.workers[0].native).toMatchObject({
+        native_status: 'completed',
+        review_decision: 'hold',
+        child_exit_code: 0,
+        child_exit_signal: null,
+      })
+    })
+
+    it('accepts a Pro v2 result with explicit null home hash and a distinct controller binding ID', async () => {
+      const ref = nativeRun({
+        request: {
+          schemaVersion: 2,
+          profileRef: 'codex-default',
+          expectedPlanType: 'pro',
+          codexHomeSha256: null,
+        },
+        result: { schemaVersion: 2 },
+        native: {
+          profileRef: 'codex-default',
+          expectedPlanType: 'pro',
+          codexHomeSha256: null,
+          childLifecycle: { state: 'exited' },
+        },
+      })
+      const worker = versionedCodexWorker(ref)
+      journal('001-run', {
+        id: 'pro-run', projectId: PROJECT_ID, workspaceId: null,
+        workers: [{ ...worker, route: { ...worker.route, bindingId: 'codex-martin' } }],
+      })
+      seedTask()
+
+      expect((await resume({ reason: 'Pro route uses host default profile', expected_updated_at: 2000 })).status).toBe(200)
+    })
+
+    it.each([
+      ['turn error', { terminal: { ...nativeBody().terminal, turn: { ...nativeBody().terminal.turn, error: { message: 'stream failed' } } } }],
+      ['running child lifecycle', { childLifecycle: { state: 'running' } }],
+      ['unknown child lifecycle', { childLifecycle: { state: 'unknown' } }],
+    ])('rejects a completed v2 result with %s', async (_label, overrides) => {
+      versionedNativeJournal(versionedNativeRun(2, overrides))
+      seedTask()
+
+      expect((await resume({ reason: 'completed evidence must be exact', expected_updated_at: 2000 })).status).toBe(409)
+    })
+
+    it('rejects an explicitly supplied journal profile that differs from the native profile', async () => {
+      const ref = failedVersionedRun()
+      const worker = versionedCodexWorker(ref, 'failed')
+      journal('001-run', {
+        id: 'profile-mismatch', projectId: PROJECT_ID, workspaceId: null,
+        workers: [{ ...worker, route: { ...worker.route, profileRef: 'codex-attacker' } }],
+      })
+      seedTask()
+
+      expect((await resume({ reason: 'profile mismatch', expected_updated_at: 2000 })).status).toBe(409)
+    })
+
+    it('accepts the synthetic v2 operational failure shape without inventing a verdict', async () => {
+      const ref = failedVersionedRun()
+      versionedNativeJournal(ref, 'failed')
+      seedTask()
+
+      const result = await resume({ reason: 'failed reviewer child is proven stopped', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(200)
+      const native = result.body.evidence.workers[0].native
+      expect(native).toMatchObject({
+        native_status: 'failed',
+        review_decision: null,
+        child_exit_code: 0,
+        child_exit_signal: null,
+      })
+    })
+
+    it.each([
+      ['failed', 'failed', null, 'SIGTERM'],
+      ['cancelled', 'cancelled', null, 'SIGKILL'],
+      ['timeout', 'failed', null, 'SIGTERM'],
+    ] as const)(
+      'preserves a %s native signal while mapping only timeout to failed controller status',
+      async (nativeStatus, workerStatus, code, signal) => {
+        const ref = versionedNativeRun(3, {
+          status: nativeStatus,
+          decision: null,
+          review: null,
+          accountAfter: null,
+          terminal: null,
+          errorCode: nativeStatus === 'timeout' ? 'native_timeout' : 'native_error',
+          childLifecycle: { state: 'exited' },
+          childExit: { observed: true, code, signal },
+        })
+        versionedNativeJournal(ref, workerStatus)
+        seedTask()
+
+        const result = await resume({ reason: `${nativeStatus} lifecycle stopped`, expected_updated_at: 2000 })
+
+        expect(result.status).toBe(200)
+        expect(result.body.evidence.workers[0]).toMatchObject({
+          status: workerStatus,
+          receipt_status: nativeStatus,
+          receipt_exit_code: null,
+          native: { native_status: nativeStatus, child_exit_code: null, child_exit_signal: signal },
+        })
+      },
+    )
+
+    it.each<[string, (ref: string) => string]>([
+      ['schema mismatch', (ref) => { const value = JSON.parse(readFileSync(ref, 'utf8')); value.schemaVersion = 3; writeFileSync(ref, JSON.stringify(value)); return ref }],
+      ['wrong profile binding', () => failedVersionedRun({ profileRef: 'codex-attacker' })],
+      ['wrong plan binding', () => failedVersionedRun({ expectedPlanType: 'pro' })],
+      ['wrong home hash binding', () => failedVersionedRun({ codexHomeSha256: 'c'.repeat(64) })],
+      ['wrong requested model', () => failedVersionedRun({ requestedModel: 'gpt-attacker' })],
+      ['wrong account identity', () => failedVersionedRun({ accountBefore: { type: 'chatgpt', emailHash: 'c'.repeat(64), planType: NATIVE.expectedPlanType } })],
+      ['wrong source/review thread binding', () => failedVersionedRun({ reviewThreadId: '11111111-2222-4333-8444-555555555555' })],
+      ['wrong task binding', () => failedVersionedRun({}, { taskRef: 'MC:9999' })],
+      ['contradictory failed pass', () => failedVersionedRun({ decision: 'pass', review: { decision: 'pass' } })],
+      ['unobserved failed exit', () => failedVersionedRun({ childExit: { observed: false, code: 0, signal: null } })],
+      ['missing failed exit outcome', () => failedVersionedRun({ childExit: { observed: true, code: null, signal: null } })],
+      ['non-exited child lifecycle', () => failedVersionedRun({ childLifecycle: { state: 'unknown' } })],
+    ])('rejects a versioned result with %s', async (_label, mutate) => {
+      const ref = mutate(versionedNativeRun(2))
+      versionedNativeJournal(ref, 'failed')
+      seedTask()
+
+      const result = await resume({ reason: 'reject inconsistent lifecycle', expected_updated_at: 2000 })
+
+      expect(result.status).toBe(409)
+      expect(result.body.evidence_code).toBe('receipt_mismatch')
+      expect(taskRow().claim_state).toBe('Released')
+    })
+
     it('accepts the raw native result: HOLD is preserved and the child exit proves completion', async () => {
       nativeJournal(nativeRun())
       seedTask()

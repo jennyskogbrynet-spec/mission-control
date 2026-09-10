@@ -38,11 +38,11 @@ const workerSchema = z
     workerId: z.string().min(1).max(200),
     taskId: z.number().int().positive(),
     dispatch: z
-      .object({ phase: z.string().min(1).max(64).optional(), modelId: z.string().min(1).max(120).nullish(), hostModelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish() })
+      .object({ phase: z.string().min(1).max(64).optional(), modelId: z.string().min(1).max(120).nullish(), hostModelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish(), bindingId: z.string().min(1).max(200).nullish(), profileRef: z.string().min(1).max(200).nullish(), expectedPlanType: z.string().min(1).max(64).nullish(), codexHomeSha256: z.string().regex(/^[0-9a-f]{64}$/).nullish() })
       .passthrough()
       .optional(),
     route: z
-      .object({ model: z.string().min(1).max(120).nullish(), modelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish() })
+      .object({ model: z.string().min(1).max(120).nullish(), modelId: z.string().min(1).max(120).nullish(), accountId: z.string().min(1).max(200).nullish(), bindingId: z.string().min(1).max(200).nullish(), profileRef: z.string().min(1).max(200).nullish(), expectedPlanType: z.string().min(1).max(64).nullish(), codexHomeSha256: z.string().regex(/^[0-9a-f]{64}$/).nullish() })
       .passthrough()
       .optional(),
     status: z.string().min(1).max(64),
@@ -91,7 +91,7 @@ export interface ReconciledWorker {
    * The exit that proves the worker's own process ended. For native receipts
    * this is the observed native child exit, never a wrapper decision exit.
    */
-  receipt_exit_code: number
+  receipt_exit_code: number | null
   receipt_digest: string
   run_id: string | null
   native?: NativeProvenance
@@ -294,6 +294,9 @@ interface JournalWorker {
   receiptRef: string | null
   models: string[]
   accountIds: string[]
+  profileRefs: string[]
+  expectedPlanTypes: string[]
+  codexHomeSha256s: string[]
   runId: string | null
   journalFile: string
 }
@@ -389,6 +392,9 @@ export function reconcileNativeTerminalEvidence(
         receiptRef: worker.receiptRef ?? null,
         models: [worker.route?.model, worker.route?.modelId, worker.dispatch?.modelId, worker.dispatch?.hostModelId].filter((v): v is string => typeof v === 'string'),
         accountIds: [worker.route?.accountId, worker.dispatch?.accountId].filter((v): v is string => typeof v === 'string'),
+        profileRefs: [worker.route?.profileRef, worker.dispatch?.profileRef].filter((v): v is string => typeof v === 'string'),
+        expectedPlanTypes: [worker.route?.expectedPlanType, worker.dispatch?.expectedPlanType].filter((v): v is string => typeof v === 'string'),
+        codexHomeSha256s: [worker.route?.codexHomeSha256, worker.dispatch?.codexHomeSha256].filter((v): v is string => typeof v === 'string'),
         runId: parsed.id ?? null,
         journalFile: name,
       })
@@ -473,6 +479,9 @@ export function reconcileNativeTerminalEvidence(
             sessionRef: worker.sessionRef,
             models: worker.models,
             accountIds: worker.accountIds,
+            profileRefs: worker.profileRefs,
+            expectedPlanTypes: worker.expectedPlanTypes,
+            codexHomeSha256s: worker.codexHomeSha256s,
           },
           { read: (filePath, roots, maxBytes) => {
             const result = readBoundedFile(filePath, roots, maxBytes)

@@ -26,6 +26,9 @@ export const MAX_NATIVE_FILE_BYTES = 512_000
 export const TERMINAL_WORKER_STATUSES = ['completed', 'failed', 'cancelled'] as const
 export type TerminalStatus = (typeof TERMINAL_WORKER_STATUSES)[number]
 
+const NATIVE_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'timeout'] as const
+export type NativeTerminalStatus = (typeof NATIVE_TERMINAL_STATUSES)[number]
+
 export const isTerminalStatus = (status: string): status is TerminalStatus =>
   (TERMINAL_WORKER_STATUSES as readonly string[]).includes(status)
 
@@ -49,9 +52,11 @@ const accountSchema = z
   })
   .passthrough()
 
+const supportedSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3)])
+
 const nativeRequestSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: supportedSchemaVersion,
     runId: uuid,
     candidate: z
       .object({
@@ -69,24 +74,27 @@ const nativeRequestSchema = z
     expectedEmailHash: sha256Hex,
     model: z.string().min(1).max(120),
     packetSha256: sha256Hex,
+    profileRef: z.string().min(1).max(200).optional(),
+    expectedPlanType: z.string().min(1).max(64).optional(),
+    codexHomeSha256: sha256Hex.nullable().optional(),
   })
   .passthrough()
 
 const nativeResultSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: supportedSchemaVersion,
     runId: uuid,
     requestSha256: sha256Hex,
     native: z
       .object({
         mechanism: z.literal('turn/start+outputSchema'),
         status: z.string().min(1).max(32),
-        decision: z.enum(['pass', 'hold']),
-        review: z.object({ decision: z.enum(['pass', 'hold']) }).passthrough(),
+        decision: z.enum(['pass', 'hold']).nullable(),
+        review: z.object({ decision: z.enum(['pass', 'hold']) }).passthrough().nullable(),
         requestedModel: z.string().min(1).max(120),
         observedModel: z.string().min(1).max(120),
         accountBefore: accountSchema,
-        accountAfter: accountSchema,
+        accountAfter: accountSchema.nullable(),
         sourceThreadId: uuid,
         reviewThreadId: uuid,
         turnId: uuid,
@@ -100,10 +108,16 @@ const nativeResultSchema = z
                 status: z.string().min(1).max(32),
                 startedAt: z.number().nullish(),
                 completedAt: z.number().nullish(),
+                error: z.unknown().nullish(),
               })
               .passthrough(),
           })
-          .passthrough(),
+          .passthrough()
+          .nullable(),
+        childLifecycle: z.object({ state: z.string().min(1).max(64) }).passthrough().nullish(),
+        profileRef: z.string().min(1).max(200).optional(),
+        expectedPlanType: z.string().min(1).max(64).optional(),
+        codexHomeSha256: sha256Hex.nullable().optional(),
         exitedReviewMode: z.unknown().nullish(),
         childExit: z
           .object({
@@ -144,15 +158,15 @@ export type NativeEvidenceKind = 'native_result' | typeof HOST_OBSERVATION_KIND
 /** Path-free provenance recorded alongside the existing reconciled worker fields. */
 export interface NativeTerminalEvidence {
   evidence_kind: NativeEvidenceKind
-  native_status: TerminalStatus
+  native_status: NativeTerminalStatus
   /** The observed exit of the native reviewer child process. */
-  child_exit_code: number
-  child_exit_signal: null
+  child_exit_code: number | null
+  child_exit_signal: string | null
   /** The wrapper CLI's decision exit, when a host observation recorded one. */
   wrapper_exit_code: number | null
   wrapper_exit_meaning: string | null
   /** Preserved verbatim; a HOLD stays a HOLD. */
-  review_decision: string
+  review_decision: string | null
   native_run_id: string
   pr_number: number
   head_sha: string
@@ -192,6 +206,9 @@ export interface NativeWorkerBinding {
   /** Registered model for the worker's route, when the journal records one. */
   models: string[]
   accountIds: string[]
+  profileRefs: string[]
+  expectedPlanTypes: string[]
+  codexHomeSha256s: string[]
 }
 
 const rawDigest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')
@@ -264,6 +281,27 @@ function readNativeResult(
     throw new Error('request.json does not hash to the requestSha256 recorded in result.json')
   }
   const request = nativeRequestSchema.parse(requestFile.json)
+  if (request.schemaVersion !== result.schemaVersion) {
+    throw new Error(`request/result schema versions differ (${request.schemaVersion}/${result.schemaVersion})`)
+  }
+  if (request.schemaVersion >= 2) {
+    for (const [label, value] of [
+      ['profileRef', request.profileRef],
+      ['expectedPlanType', request.expectedPlanType],
+    ] as const) {
+      if (!value) throw new Error(`v${request.schemaVersion} request is missing ${label}`)
+    }
+    if (!Object.prototype.hasOwnProperty.call(request, 'codexHomeSha256')) {
+      throw new Error(`v${request.schemaVersion} request is missing codexHomeSha256`)
+    }
+    const expectedHomeHash = request.expectedPlanType === 'plus' ? 'hash' :
+      request.expectedPlanType === 'pro' ? 'null' : 'unsupported'
+    if ((expectedHomeHash === 'hash' && typeof request.codexHomeSha256 !== 'string') ||
+        (expectedHomeHash === 'null' && request.codexHomeSha256 !== null) ||
+        expectedHomeHash === 'unsupported') {
+      throw new Error('versioned request plan/home binding is invalid')
+    }
+  }
   if (request.runId !== runId) {
     throw new Error(`request runId ${request.runId} does not match directory ${runId}`)
   }
@@ -276,49 +314,80 @@ function readNativeResult(
   }
 
   const native = result.native
-  if (!isTerminalStatus(native.status)) {
+  if (!(NATIVE_TERMINAL_STATUSES as readonly string[]).includes(native.status)) {
     throw new Error(`native status ${native.status} is not terminal`)
   }
-  if (native.status !== binding.status) {
+  const statusMatches = native.status === binding.status ||
+    (native.status === 'timeout' && binding.status === 'failed')
+  if (!statusMatches) {
     throw new Error(`native status ${native.status} does not match worker status ${binding.status}`)
-  }
-  if (native.errorCode !== null && native.errorCode !== undefined) {
-    throw new Error(`native run reported errorCode ${native.errorCode}`)
   }
   if (native.exitedReviewMode !== null && native.exitedReviewMode !== undefined) {
     throw new Error('native run left review mode')
   }
 
-  // Observed child exit. Unobserved, missing or signalled exits prove nothing.
+  // Observed child exit. A failed/cancelled child may report either the actual
+  // integer code or the actual signal. It may never report neither.
   const childExit = native.childExit
   if (childExit.observed !== true) throw new Error('native child exit was not observed')
-  if (typeof childExit.code !== 'number') throw new Error('native child exit code is missing')
-  if (childExit.signal !== null && childExit.signal !== undefined) {
-    throw new Error(`native child was signalled with ${childExit.signal}`)
+  const exitCode = childExit.code ?? null
+  const exitSignal = childExit.signal ?? null
+  if (exitCode === null && exitSignal === null) throw new Error('native child exit outcome is missing')
+  if (result.schemaVersion === 1 && (exitCode === null || exitSignal !== null)) {
+    throw new Error('v1 native child exit requires an integer code and no signal')
   }
-  if (native.status === 'completed' && childExit.code !== 0) {
-    throw new Error(`native status completed contradicts child exit ${childExit.code}`)
+  if (native.status === 'completed' && (exitCode !== 0 || exitSignal !== null)) {
+    throw new Error(`native status completed contradicts child exit ${String(exitCode)}/${String(exitSignal)}`)
+  }
+
+  const strictReviewCompletion = request.schemaVersion === 1 || native.status === 'completed'
+  if (strictReviewCompletion) {
+    if (native.errorCode !== null && native.errorCode !== undefined) {
+      throw new Error(`native run reported errorCode ${native.errorCode}`)
+    }
+    if (!native.accountAfter) throw new Error('native accountAfter is missing')
+    if (!native.terminal) throw new Error('native terminal turn is missing')
+    if (!native.decision || !native.review) throw new Error('native review verdict is missing')
+    if (native.terminal.turn.error !== null && native.terminal.turn.error !== undefined) {
+      throw new Error('completed native turn reported an error')
+    }
+    if (native.status === 'completed' && native.childLifecycle && native.childLifecycle.state !== 'exited') {
+      throw new Error('completed native child lifecycle was not observed exited')
+    }
+  } else {
+    if (!native.errorCode) throw new Error('failed native run is missing its operational error')
+    if (native.childLifecycle?.state !== 'exited') {
+      throw new Error('failed native child lifecycle was not observed exited')
+    }
+    if ((native.decision === null) !== (native.review === null)) {
+      throw new Error('failed native decision/review presence differs')
+    }
+    if (native.decision === 'pass' || native.review?.decision === 'pass') {
+      throw new Error('failed native run contradicts a pass verdict')
+    }
   }
 
   // Threads and turn: one source thread, reviewed and terminated in place.
   if (native.sourceThreadId !== native.reviewThreadId) {
     throw new Error('native source and review thread ids differ')
   }
-  if (native.terminal.threadId !== native.sourceThreadId) {
-    throw new Error('native terminal thread id does not match the source thread')
-  }
-  if (native.terminal.turn.id !== native.turnId) {
-    throw new Error('native terminal turn id does not match the run turn id')
-  }
-  if (native.terminal.method !== 'turn/completed') {
-    throw new Error(`native terminal method ${native.terminal.method} is not the terminal turn notification`)
-  }
-  const turnStatus = native.terminal.turn.status
-  if (!TERMINAL_TURN_STATUSES.includes(turnStatus)) {
-    throw new Error(`native turn status ${turnStatus} is not terminal`)
-  }
-  if (native.status === 'completed' && turnStatus !== 'completed') {
-    throw new Error(`native status completed contradicts turn status ${turnStatus}`)
+  if (native.terminal) {
+    if (native.terminal.threadId !== native.sourceThreadId) {
+      throw new Error('native terminal thread id does not match the source thread')
+    }
+    if (native.terminal.turn.id !== native.turnId) {
+      throw new Error('native terminal turn id does not match the run turn id')
+    }
+    if (native.terminal.method !== 'turn/completed') {
+      throw new Error(`native terminal method ${native.terminal.method} is not the terminal turn notification`)
+    }
+    const turnStatus = native.terminal.turn.status
+    if (!TERMINAL_TURN_STATUSES.includes(turnStatus)) {
+      throw new Error(`native turn status ${turnStatus} is not terminal`)
+    }
+    if (native.status === 'completed' && turnStatus !== 'completed') {
+      throw new Error(`native status completed contradicts turn status ${turnStatus}`)
+    }
   }
   if (!sessionBinds(binding.sessionRef, native.sourceThreadId)) {
     throw new Error('worker session ref does not bind the native source thread')
@@ -336,12 +405,34 @@ function readNativeResult(
   for (const accountId of binding.accountIds) {
     if (accountId !== request.accountId) throw new Error('registered worker account mismatch')
   }
+  if (request.schemaVersion >= 2) {
+    if (!Object.prototype.hasOwnProperty.call(native, 'codexHomeSha256')) {
+      throw new Error('versioned native result is missing codexHomeSha256')
+    }
+    if (native.profileRef !== request.profileRef ||
+        native.expectedPlanType !== request.expectedPlanType ||
+        native.codexHomeSha256 !== request.codexHomeSha256) {
+      throw new Error('native route/profile binding does not match the request')
+    }
+    for (const profileRef of binding.profileRefs ?? []) {
+      if (profileRef !== request.profileRef) throw new Error('registered worker profile mismatch')
+    }
+    for (const planType of binding.expectedPlanTypes ?? []) {
+      if (planType !== request.expectedPlanType) throw new Error('registered worker plan mismatch')
+    }
+    for (const homeHash of binding.codexHomeSha256s ?? []) {
+      if (homeHash !== request.codexHomeSha256) throw new Error('registered worker home hash mismatch')
+    }
+  }
   for (const [label, account] of [
     ['accountBefore', native.accountBefore],
     ['accountAfter', native.accountAfter],
   ] as const) {
     if (account && account.emailHash !== request.expectedEmailHash) {
       throw new Error(`${label} identity does not match the requested account`)
+    }
+    if (account && request.schemaVersion >= 2 && account.planType !== request.expectedPlanType) {
+      throw new Error(`${label} plan does not match the requested route`)
     }
   }
   if (native.accountBefore && native.accountAfter) {
@@ -365,14 +456,14 @@ function readNativeResult(
   }
 
   // The review decision is preserved exactly as both fields recorded it.
-  if (native.decision !== native.review.decision) {
-    throw new Error(`decision ${native.decision} contradicts review.decision ${native.review.decision}`)
+  if (native.decision !== (native.review?.decision ?? null)) {
+    throw new Error(`decision ${native.decision} contradicts review.decision ${native.review?.decision ?? null}`)
   }
 
   return {
-    native_status: native.status,
-    child_exit_code: childExit.code,
-    child_exit_signal: null,
+    native_status: native.status as NativeTerminalStatus,
+    child_exit_code: exitCode,
+    child_exit_signal: exitSignal,
     review_decision: native.decision,
     native_run_id: runId,
     pr_number: prNumber,

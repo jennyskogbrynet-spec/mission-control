@@ -82,9 +82,7 @@ Resume is allowed only when **all** of the following hold:
   (`completed` ⇒ `0`, `failed`/`cancelled` ⇒ any integer exit code) and the same session
 - a passed `deadlineAt` is never treated as proof and is not read
 
-A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved;
-resume does not require the review to have passed. Old terminal receipts are
-accepted regardless of age.
+A failed worker with an actual integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. An unobserved exit, or an observed exit with both code and signal null, remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
 
 ## Receipt shapes
 
@@ -99,7 +97,7 @@ native receipt is rejected — it never falls back to the lax flat matcher.
 as before: `completed` ⇒ `exitCode 0`, every supplied identity field must agree,
 and `completed ⇒ exit 0` was **not** loosened for these.
 
-### 2. Raw native Codex result (MC1304 shape)
+### 2. Raw native Codex result (versions 1, 2 and 3)
 
 The controller points `receiptRef` straight at the immutable
 
@@ -112,6 +110,8 @@ filename, a numeric PR directory and a canonical UUID run directory, all inside
 the fixed native root. A raw result found anywhere else is not trusted, and a
 flat receipt found *inside* the native root is rejected.
 
+Request and result `schemaVersion` must match exactly and be one of `1`, `2` or `3`. There is no downgrade or best-effort parser. Version 1 retains the historical completed/pass/HOLD contract. Versions 2 and 3 additionally bind `profileRef`, `expectedPlanType` and `codexHomeSha256` between request and result, and to every corresponding journal route/dispatch value that is supplied. Plus requires a SHA-256 home hash; Pro requires an explicit null home hash. A controller `bindingId` names the compute binding and is not treated as a profile reference. The registered account and model remain authoritative journal bindings.
+
 All of the following must hold:
 
 - `sha256(raw request.json bytes) == result.requestSha256`
@@ -120,19 +120,16 @@ All of the following must hold:
 - `request.taskRef == "MC:<taskId>"` for the task being resumed
 - `native.requestedModel == native.observedModel == request.model`, and the
   journal's every supplied route/dispatch model when recorded; supplied account IDs must also match
-- `native.accountBefore/accountAfter.emailHash == request.expectedEmailHash`,
-  both account records are required with type `chatgpt`, and the account did not change during the run
+- `native.accountBefore.emailHash == request.expectedEmailHash`; completed results require the matching `accountAfter`, while a version 2 or 3 operational failure may omit it. Any present second read must match the requested identity and first read. Version 2 and 3 account plan types must match `expectedPlanType`.
 - `native.sourceThreadId == native.reviewThreadId == native.terminal.threadId`,
   and the registered worker `sessionRef` binds that thread id
-- `native.turnId == native.terminal.turn.id`, the notification is exactly `turn/completed`, mechanism is `turn/start+outputSchema`, the turn status is terminal, and
-  a `completed` run requires a `completed` turn
-- `native.childExit.observed == true`, an integer `code`, `signal == null`
-- `native.status` is terminal and equals the journal worker's status;
-  `completed` requires child exit `0`
-- `native.errorCode == null` and the run did not leave review mode
+- completed results require `native.turnId == native.terminal.turn.id`, notification `turn/completed`, mechanism `turn/start+outputSchema`, and a completed turn. A version 2 or 3 operational failure may omit `terminal`; if present it must still match the exact source thread and turn.
+- `native.childExit.observed == true`; completed results and all version 1 results require an integer code and null signal. Version 2 and 3 failed/cancelled results may carry an integer code or an actual signal with nullable code. Neither may be absent together.
+- `native.status` is terminal and equals the journal worker status, except native `timeout` maps only to controller `failed` and remains `timeout` in provenance. Completed requires exit code `0` and no signal.
+- completed and version 1 results require `native.errorCode == null`. A version 2 or 3 operational failure requires an error code and `childLifecycle.state == "exited"`. No result may report leaving review mode.
 - `gitBefore`/`gitAfter` are clean and equal `request.candidate.headSha/treeSha`;
   `baseSha`, `treeSha`, `policyCommit` and `policySha256` must be well formed
-- `native.decision == native.review.decision`, recorded verbatim
+- completed and version 1 results require `native.decision == native.review.decision`, recorded verbatim. A version 2 or 3 operational failure may omit both. It may never pair failure with PASS or provide only one of decision/review.
 
 ### 3. Derived host observation (MC1305 shape)
 
@@ -161,16 +158,16 @@ For native receipts each reconciled worker gains an optional, path-free
 | --- | --- |
 | `evidence_kind` | `native_result` or `host_observation_of_native_release_review` |
 | `native_status` | the native run's own terminal status |
-| `child_exit_code` / `child_exit_signal` | the **observed** exit of the reviewer child process |
+| `child_exit_code` / `child_exit_signal` | the **observed** exit of the reviewer child process; code is nullable only when an actual signal is preserved |
 | `wrapper_exit_code` / `wrapper_exit_meaning` | the wrapper CLI's decision exit, `null` for a raw result |
-| `review_decision` | the review verdict, e.g. `hold`, copied verbatim |
+| `review_decision` | the review verdict, e.g. `hold`, copied verbatim; null for an operational failure that produced no verdict |
 | `native_run_id`, `pr_number`, `head_sha`, `task_ref` | the candidate the run was bound to |
 | `observed_model`, `thread_id`, `turn_id` | reviewer identity |
 | `request_sha256` | SHA-256 of the raw `request.json` bytes, verified |
 | `result_digest` / `wrapper_digest` | SHA-256 of the raw source / wrapper bytes |
 
 `receipt_exit_code` keeps its existing meaning — the exit that proves *this
-worker's* process ended — so for native receipts it is the child exit.
+worker's* process ended — so for native receipts it is the child exit and may be null when `native.child_exit_signal` carries the observed outcome.
 `receipt_status` is the native status and `receipt_digest` remains SHA-256 of
 canonical parsed JSON of the receipt the journal referenced. `receipt_refs` may
 contain two entries for one worker when an observation was followed: the
@@ -178,7 +175,7 @@ observation and the authoritative result it was checked against.
 
 **Limits.** Three facts are deliberately kept apart and none implies another:
 the review *decision*, the wrapper CLI *gate exit*, and the native *process*
-completion. Resume proves only the third. A HOLD stays a HOLD: it is preserved
+completion. Resume proves only the third. A missing decision stays null. A HOLD stays a HOLD: it is preserved
 in the audit and this endpoint never converts it to a pass, never approves a
 release and never re-runs a review. Nothing in the source receipts, the
 `request.json`/`result.json` pair or the controller journal is rewritten,
