@@ -210,7 +210,7 @@ function nativeRun(options: NativeRunOptions = {}): string {
 }
 
 function versionedNativeRun(
-  schemaVersion: 2 | 3,
+  schemaVersion: 2 | 3 | 4,
   nativeOverrides: Record<string, unknown> = {},
   requestOverrides: Record<string, unknown> = {},
 ): string {
@@ -787,7 +787,7 @@ describe('POST /api/tasks/[id]/resume-review', () => {
   // integrator writes a derived summary that points at it. Neither may be
   // rewritten into the older flat shape to make a resume pass.
   describe('native Codex review receipts', () => {
-    it.each([2, 3] as const)('accepts a completed v%s result with exact route bindings', async (version) => {
+    it.each([2, 3, 4] as const)('accepts a completed v%s result with exact route bindings', async (version) => {
       versionedNativeJournal(versionedNativeRun(version))
       seedTask()
 
@@ -926,7 +926,7 @@ describe('POST /api/tasks/[id]/resume-review', () => {
       },
     )
 
-    describe.each([2, 3] as const)('v%s child termination evidence', (version) => {
+    describe.each([2, 3, 4] as const)('v%s child termination evidence', (version) => {
       it.each([
         { observed: true, code: 0 },
         { observed: true, signal: 'SIGTERM' },

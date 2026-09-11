@@ -82,7 +82,7 @@ Resume is allowed only when **all** of the following hold:
   (`completed` ⇒ `0`, `failed`/`cancelled` ⇒ any integer exit code) and the same session
 - a passed `deadlineAt` is never treated as proof and is not read
 
-A failed worker with an actual safe integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2 and 3 native results may instead preserve an observed termination signal with a null code. Both `code` and `signal` fields must be present; the unused field must be explicitly null. The signal must be an own entry in the host operating system signal table. Empty, unknown and inherited property names are rejected. An unobserved exit, missing outcome, or simultaneous code and signal remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
+A failed worker with an actual safe integer exit code (including 0 after failed result validation) is terminal evidence and is preserved. Version 2, 3 and 4 native results may instead preserve an observed termination signal with a null code. Both `code` and `signal` fields must be present; the unused field must be explicitly null. The signal must be an own entry in the host operating system signal table. Empty, unknown and inherited property names are rejected. An unobserved exit, missing outcome, or simultaneous code and signal remains blocked. Resume does not require the review to have passed. Old terminal receipts are accepted regardless of age.
 
 ## Receipt shapes
 
@@ -97,7 +97,7 @@ native receipt is rejected — it never falls back to the lax flat matcher.
 as before: `completed` ⇒ `exitCode 0`, every supplied identity field must agree,
 and `completed ⇒ exit 0` was **not** loosened for these.
 
-### 2. Raw native Codex result (versions 1, 2 and 3)
+### 2. Raw native Codex result (versions 1, 2, 3 and 4)
 
 The controller points `receiptRef` straight at the immutable
 
@@ -110,7 +110,7 @@ filename, a numeric PR directory and a canonical UUID run directory, all inside
 the fixed native root. A raw result found anywhere else is not trusted, and a
 flat receipt found *inside* the native root is rejected.
 
-Request and result `schemaVersion` must match exactly and be one of `1`, `2` or `3`. There is no downgrade or best-effort parser. Version 1 retains the historical completed/pass/HOLD contract. Versions 2 and 3 additionally bind `profileRef`, `expectedPlanType` and `codexHomeSha256` between request and result, and to every corresponding journal route/dispatch value that is supplied. Plus requires a SHA-256 home hash; Pro requires an explicit null home hash. A controller `bindingId` names the compute binding and is not treated as a profile reference. The registered account and model remain authoritative journal bindings.
+Request and result `schemaVersion` must match exactly and be one of `1`, `2`, `3` or `4`. There is no downgrade or best-effort parser. Version 1 retains the historical completed/pass/HOLD contract. Versions 2, 3 and 4 additionally bind `profileRef`, `expectedPlanType` and `codexHomeSha256` between request and result, and to every corresponding journal route/dispatch value that is supplied. Plus requires a SHA-256 home hash; Pro requires an explicit null home hash. A controller `bindingId` names the compute binding and is not treated as a profile reference. The registered account and model remain authoritative journal bindings.
 
 An explicitly supplied null home in either the journal route or dispatch is a binding, not an omitted field. It must match the request's home value. Contradictory bindings cannot recover a Plus review lifecycle; historical journals that omit the optional field retain their existing compatibility.
 
@@ -122,16 +122,16 @@ All of the following must hold:
 - `request.taskRef == "MC:<taskId>"` for the task being resumed
 - `native.requestedModel == native.observedModel == request.model`, and the
   journal's every supplied route/dispatch model when recorded; supplied account IDs must also match
-- `native.accountBefore.emailHash == request.expectedEmailHash`; completed results require the matching `accountAfter`, while a version 2 or 3 operational failure may omit it. Any present second read must match the requested identity and first read. Version 2 and 3 account plan types must match `expectedPlanType`.
+- `native.accountBefore.emailHash == request.expectedEmailHash`; completed results require the matching `accountAfter`, while a version 2, 3 or 4 operational failure may omit it. Any present second read must match the requested identity and first read. Version 2, 3 and 4 account plan types must match `expectedPlanType`.
 - `native.sourceThreadId == native.reviewThreadId == native.terminal.threadId`,
   and the registered worker `sessionRef` binds that thread id
-- completed results require `native.turnId == native.terminal.turn.id`, notification `turn/completed`, mechanism `turn/start+outputSchema`, and a completed turn. A version 2 or 3 operational failure may omit `terminal`; if present it must still match the exact source thread and turn.
-- `native.childExit.observed == true`; completed results and all version 1 results require an integer code and null signal. Version 2 and 3 failed/cancelled results may carry an integer code or an actual signal with nullable code. Exactly one outcome must be present; a signal must exist in the host operating system signal table.
+- completed results require `native.turnId == native.terminal.turn.id`, notification `turn/completed`, mechanism `turn/start+outputSchema`, and a completed turn. A version 2, 3 or 4 operational failure may omit `terminal`; if present it must still match the exact source thread and turn.
+- `native.childExit.observed == true`; completed results and all version 1 results require an integer code and null signal. Version 2, 3 and 4 failed/cancelled results may carry an integer code or an actual signal with nullable code. Exactly one outcome must be present; a signal must exist in the host operating system signal table.
 - `native.status` is terminal and equals the journal worker status, except native `timeout` maps only to controller `failed` and remains `timeout` in provenance. Completed requires exit code `0` and no signal.
-- completed and version 1 results require `native.errorCode == null`. A version 2 or 3 operational failure requires an error code and `childLifecycle.state == "exited"`. No result may report leaving review mode.
+- completed and version 1 results require `native.errorCode == null`. A version 2, 3 or 4 operational failure requires an error code and `childLifecycle.state == "exited"`. No result may report leaving review mode.
 - `gitBefore`/`gitAfter` are clean and equal `request.candidate.headSha/treeSha`;
   `baseSha`, `treeSha`, `policyCommit` and `policySha256` must be well formed
-- completed and version 1 results require `native.decision == native.review.decision`, recorded verbatim. A version 2 or 3 operational failure may omit both. It may never pair failure with PASS or provide only one of decision/review.
+- completed and version 1 results require `native.decision == native.review.decision`, recorded verbatim. A version 2, 3 or 4 operational failure may omit both. It may never pair failure with PASS or provide only one of decision/review.
 
 ### 3. Derived host observation (MC1305 shape)
 
@@ -250,3 +250,5 @@ Released ticket cannot acquire a new registered worker before this transition.
 Integrator corrections: receipt identity fields must all agree, receipt digests cover canonical JSON content, temporary receipt roots are narrower than the home directory, existing malformed resume history fails closed, and task IDs/revisions must be safe integers. A failed worker with exit 0 is terminal when its child finished but result validation failed; this does not mark its review approved.
 
 The evidence summary and errors omit filesystem paths. The authenticated primary-workspace task response and task.updated broadcast retain the stored audit references inside metadata, as existing scoped task reads do. Safety between journal reconciliation and the conditional database write depends on every native launch requiring a prior MC claim and registered worker; this endpoint does not supervise unregistered processes. `receipt_digest` is SHA-256 of canonical parsed JSON, not raw file bytes. For host observations it covers both parsed files as `{ receipt, nativeResult }`; unversioned receipt digests are unchanged. More than 400 journals fails closed; reconcile/archive controller history deliberately with preserved receipts before that bound, never delete live or unknown worker evidence.
+
+Policy v4 removes numerical release-review attempt limits. Mission Control accepts its exact v4 request/result receipts with the same identity, route and terminal-process checks as v3. This endpoint reconciles worker termination only; release approval and operational retry eligibility remain the versioned release adapter’s responsibility.

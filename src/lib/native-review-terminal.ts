@@ -53,7 +53,7 @@ const accountSchema = z
   })
   .passthrough()
 
-const supportedSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3)])
+const supportedSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)])
 
 const nativeRequestSchema = z
   .object({
