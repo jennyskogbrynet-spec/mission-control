@@ -16,6 +16,21 @@ COVERAGE = [{'runtime': 'codex', 'start': '2026-06-01T00:00:00Z', 'end': '2026-0
 
 
 class SnapshotImportTests(unittest.TestCase):
+    def test_pretty_published_bytes_are_the_size_boundary(self):
+        row = {'id': '1234567890abcdef', 'name': 'x' * 300, 'origins': [], 'status': [], 'categories': {}, 'lastUse': None, 'days7': None, 'days30': None, 'days90': None, 'sessions': None, 'words': 20, 'bytes': 100, 'flags': ['x' * 100] * 3, 'proposal': 'x' * 300}
+        snapshot = adapter.make_snapshot(INVENTORY)
+        snapshot['skills'] = [{**row, 'id': f'{index:016x}'} for index in range(9000)]
+        self.assertLess(len(json.dumps(snapshot, ensure_ascii=False).encode('utf8')), 10 * 1024 * 1024)
+        self.assertGreater(len((json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n').encode('utf8')), 10 * 1024 * 1024)
+        with self.assertRaises(ValueError): adapter.validate_snapshot(snapshot)
+        with self.assertRaises(ValueError): adapter.serialize_snapshot(snapshot)
+
+    def test_unavailable_hook_none_records_preserves_native_partial(self):
+        result = adapter.make_snapshot(INVENTORY, {'skills': [{**OBSERVATION, 'supplemental_hook_observations': None}], 'coverage': COVERAGE + [{'runtime': 'claude_hook', 'records': None, 'files_discovered': None, 'readable': False}]})
+        self.assertEqual(result['coverage']['status'], 'partial')
+        self.assertEqual(result['skills'][0]['days7'], 0)
+        self.assertNotIn('supplemental_hook', result['skills'][0]['categories'])
+        self.assertEqual(adapter.validate_snapshot(result)['coverage']['sources'], ['codex'])
     def test_full_shared_schema_rejects_malformed_counts_ids_and_paths(self):
         valid = adapter.make_snapshot(INVENTORY, {'skills': [OBSERVATION], 'coverage': COVERAGE})
         self.assertEqual(adapter.validate_snapshot(valid)['version'], 1)

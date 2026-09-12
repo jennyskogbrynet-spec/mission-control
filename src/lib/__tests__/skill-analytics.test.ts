@@ -46,6 +46,7 @@ describe('skill analytics privacy and coverage', () => {
     expect(filterSortSkills(rows, '', 'days7', false).map(r => r.days7)).toEqual([0, 3, null])
     expect(filterSortSkills(rows, '', 'days7', true).map(r => r.days7)).toEqual([3, 0, null])
     expect(filterSortSkills(rows, 'DOCUMENT_READ', 'name', false)).toHaveLength(3)
+    expect(filterSortSkills(rows, 'Skill-dokument lest', 'name', false)).toHaveLength(3)
     expect(filterSortSkills(rows, 'beta', 'name', false)).toHaveLength(1)
     expect(rows[0].name).toBe('alpha')
   })

@@ -32,6 +32,8 @@ describe('skill analytics panel', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Søk i skill-statistikk' }), { target: { value: 'alpha' } })
     expect(within(table).getAllByRole('row')).toHaveLength(2)
     expect(screen.queryByText('beta')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Søk i skill-statistikk' }), { target: { value: 'Skill-dokument lest' } })
+    expect(within(table).getAllByRole('row')).toHaveLength(4)
   })
 
   it('distinguishes missing workspace snapshot from transport failure', async () => {

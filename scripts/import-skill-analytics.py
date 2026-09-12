@@ -8,6 +8,17 @@ import subprocess
 from pathlib import Path
 
 
+def serialize_snapshot(snapshot):
+    """Serialize the exact published format and enforce its UTF-8 byte limit."""
+    try:
+        text = json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+        if len(text.encode('utf8')) > 10 * 1024 * 1024:
+            raise ValueError('Invalid skill analytics snapshot')
+        return text
+    except (TypeError, ValueError):
+        raise ValueError('Invalid skill analytics snapshot') from None
+
+
 def validate_snapshot(snapshot):
     """Return shared-schema validated public data, or sanitized ValueError.
 
@@ -15,9 +26,7 @@ def validate_snapshot(snapshot):
     Safe to call again after proposal enrichment and before publication.
     """
     try:
-        text = json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
-        if len(text.encode('utf8')) > 10 * 1024 * 1024:
-            raise ValueError('Invalid skill analytics snapshot')
+        text = serialize_snapshot(snapshot)
         result = subprocess.run(['node', str(Path(__file__).with_name('validate-skill-analytics.mjs'))], input=text, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise ValueError('Invalid skill analytics snapshot')
@@ -36,7 +45,7 @@ def make_snapshot(inventory, usage=None):
     coverage = (usage or {}).get('coverage', [])
     native_coverage = [c for c in coverage if c.get('runtime') not in ('claude_hook', 'openclaw_loader_counters') and c.get('kind') != 'supplemental_cumulative_counter' and c.get('start') and (c.get('files_parsed', 0) + c.get('files_cached', 0) > 0)]
     supplemental_available = {
-        'supplemental_hook': any(c.get('runtime') == 'claude_hook' and c.get('files_discovered', 0) > 0 for c in coverage),
+        'supplemental_hook': any(c.get('runtime') == 'claude_hook' and (c.get('files_discovered') or 0) > 0 for c in coverage),
         'supplemental_loader_counter_total': any(c.get('runtime') == 'openclaw_loader_counters' and c.get('readable') is True for c in coverage),
     }
     aggregates = {}
@@ -83,7 +92,7 @@ def make_snapshot(inventory, usage=None):
         'generatedAt': iso((usage or {}).get('as_of')) or dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00', 'Z'),
         'coverage': {
             'status': 'partial' if native_coverage else 'unavailable',
-            'sources': sorted({str(c['runtime']) for c in coverage if c in native_coverage or (c.get('runtime') in ('claude_hook', 'openclaw_loader_counters') and (c.get('records', 0) > 0 or c.get('readable')))}),
+            'sources': sorted({str(c['runtime']) for c in coverage if c in native_coverage or (c.get('runtime') in ('claude_hook', 'openclaw_loader_counters') and ((c.get('records') or 0) > 0 or c.get('readable')))}),
             'limitations': [
                 'Kun lokale, innsamlede spor er dekket; uobserverte samtaler og eldre historikk kan mangle.',
                 'Dagtall summerer eksplisitte invokasjoner, dokumentlesing og skriptkjøring; kategoriene vises separat.',
@@ -108,11 +117,12 @@ def main():
         inventory = json.loads(args.inventory.read_text())
         usage = json.loads(args.usage.read_text()) if args.usage else None
         snapshot = validate_snapshot(make_snapshot(inventory, usage))
+        serialized = serialize_snapshot(snapshot)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, OSError):
         parser.exit(2, 'Invalid skill analytics snapshot\n')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_suffix('.tmp')
-    temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n')
+    temp.write_text(serialized)
     os.chmod(temp, 0o600)
     temp.replace(args.output)
     print(f"Imported {len(snapshot['skills'])} skills; coverage={snapshot['coverage']['status']}")

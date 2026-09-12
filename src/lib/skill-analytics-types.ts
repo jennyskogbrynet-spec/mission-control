@@ -23,6 +23,8 @@ export interface SkillAnalyticsSnapshot {
   skills: SkillAnalyticsRow[]
 }
 
+export const categoryLabels: Record<string, string> = { explicit_invocation: 'Invokasjoner', document_read: 'Skill-dokument lest', script_execution: 'Skriptkjøring', completed_tool_calls: 'Fullførte verktøykall', failed_tool_calls: 'Feilede verktøykall', unknown_outcome: 'Ukjent utfall', supplemental_hook: 'Supplerende hook', direct_tool_invocations: 'Direkte verktøyinvokasjoner', wrapped_command_attempts: 'Innrammede kommandoforsøk', supplemental_loader_counter_total: 'Supplerende kumulative loader-tall' }
+
 export type AnalyticsSort = 'name' | 'days7' | 'days30' | 'days90' | 'sessions' | 'words' | 'lastUse'
 
 export function skillAnalyticsCsv(rows: SkillAnalyticsRow[]): string {
@@ -38,7 +40,7 @@ export function skillAnalyticsCsv(rows: SkillAnalyticsRow[]): string {
 
 export function filterSortSkills(rows: SkillAnalyticsRow[], query: string, sort: AnalyticsSort, descending: boolean) {
   const q = query.trim().toLowerCase()
-  return rows.filter(row => `${row.name} ${row.origins.join(' ')} ${row.status.join(' ')} ${row.flags.join(' ')} ${Object.keys(row.categories).join(' ')} ${row.proposal}`.toLowerCase().includes(q))
+  return rows.filter(row => `${row.name} ${row.origins.join(' ')} ${row.status.join(' ')} ${row.flags.join(' ')} ${Object.keys(row.categories).map(key => `${key} ${categoryLabels[key] || ''}`).join(' ')} ${row.proposal}`.toLowerCase().includes(q))
     .sort((a, b) => {
       const av = a[sort], bv = b[sort]
       // Unknown values always remain last, regardless of direction.

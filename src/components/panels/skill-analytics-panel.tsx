@@ -1,14 +1,14 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { filterSortSkills, skillAnalyticsCsv, type AnalyticsSort, type SkillAnalyticsSnapshot } from '@/lib/skill-analytics-types'
+import { categoryLabels, filterSortSkills, skillAnalyticsCsv, type AnalyticsSort, type SkillAnalyticsSnapshot } from '@/lib/skill-analytics-types'
 
 const columns: Array<{ key: AnalyticsSort; label: string }> = [
   { key: 'name', label: 'Skill' }, { key: 'lastUse', label: 'Sist observert' },
   { key: 'days7', label: '7 dager' }, { key: 'days30', label: '30 dager' },
   { key: 'days90', label: '90 dager' }, { key: 'sessions', label: 'Sesjoner' }, { key: 'words', label: 'Kontekststørrelse' },
 ]
-const categoryLabels: Record<string, string> = { explicit_invocation: 'Invokasjoner', document_read: 'Skill-dokument lest', script_execution: 'Skriptkjøring', completed_tool_calls: 'Fullførte verktøykall', failed_tool_calls: 'Feilede verktøykall', unknown_outcome: 'Ukjent utfall', supplemental_hook: 'Supplerende hook', direct_tool_invocations: 'Direkte verktøyinvokasjoner', wrapped_command_attempts: 'Innrammede kommandoforsøk', supplemental_loader_counter_total: 'Supplerende kumulative loader-tall' }
+
 const observed = (value: number | null) => value === null ? 'Ukjent' : value.toLocaleString()
 
 export function SkillAnalyticsPanel() {
