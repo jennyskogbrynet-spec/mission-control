@@ -6,12 +6,17 @@ import { validateBody, createMessageSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 import { scanForInjection } from '@/lib/injection-guard'
-import { scanForSecrets } from '@/lib/secret-scanner'
+import { redactSecrets, scanForSecrets } from '@/lib/secret-scanner'
 import { logSecurityEvent } from '@/lib/security-events'
+import { getActiveProfile } from '@/lib/hook-profiles'
 
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+
+  // Both the local gateway and its hook-profile settings belong to the primary workspace.
+  const workspaceId = auth.user.workspace_id
+  if (workspaceId !== 1) return NextResponse.json({ error: 'Agent commands are only available in the primary workspace' }, { status: 403 })
 
   const rateCheck = mutationLimiter(request)
   if (rateCheck) return rateCheck
@@ -36,13 +41,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const secretHits = scanForSecrets(message)
+    const profile = getActiveProfile()
+    const secretHits = profile.scanSecrets || profile.blockOnSecretDetection ? scanForSecrets(message) : []
     if (secretHits.length > 0) {
-      try { logSecurityEvent({ event_type: 'secret_exposure', severity: 'critical', source: 'agent-message', agent_name: from, detail: JSON.stringify({ count: secretHits.length, types: secretHits.map(s => s.type) }), workspace_id: auth.user.workspace_id ?? 1, tenant_id: 1 }) } catch {}
+      const types = [...new Set(secretHits.map(hit => hit.type))]
+      try { logSecurityEvent({ event_type: 'secret_exposure', severity: 'critical', source: 'agent-message', agent_name: from, detail: JSON.stringify({ count: secretHits.length, types, blocked: profile.blockOnSecretDetection }), workspace_id: workspaceId, tenant_id: auth.user.tenant_id ?? 1 }) } catch {}
+      // Never dispatch or create a message preview before the blocking policy is enforced.
+      if (profile.blockOnSecretDetection) {
+        return NextResponse.json({ error: 'Message blocked: remove credentials before sending', secretTypes: types }, { status: 422 })
+      }
     }
 
     const db = getDatabase()
-    const workspaceId = auth.user.workspace_id ?? 1;
     const agent = db
       .prepare('SELECT * FROM agents WHERE name = ? AND workspace_id = ?')
       .get(to, workspaceId) as any
@@ -61,11 +71,13 @@ export async function POST(request: NextRequest) {
     if (idempotencyKey && !/^[0-9a-f-]{36}$/i.test(idempotencyKey)) return NextResponse.json({ error: 'Invalid idempotency key' }, { status: 400 })
     const delivery = await sendAgentCommand(sessionKey, `Message from ${from}: ${message}`, idempotencyKey)
 
+    // Nonblocking profiles may permit delivery, but notification previews need no credentials.
+    const preview = redactSecrets(message)
     db_helpers.createNotification(
       to,
       'message',
       'Direct Message',
-      `${from}: ${message.substring(0, 200)}${message.length > 200 ? '...' : ''}`,
+      `${from}: ${preview.substring(0, 200)}${preview.length > 200 ? '...' : ''}`,
       'agent',
       agent.id,
       workspaceId
@@ -82,8 +94,9 @@ export async function POST(request: NextRequest) {
     )
 
     return NextResponse.json({ success: true, ...delivery })
-  } catch (error) {
-    logger.error({ err: error }, 'POST /api/agents/message error')
+  } catch {
+    // Gateway exceptions can echo the supplied message; never persist that payload in logs.
+    logger.error('POST /api/agents/message failed; delivery may be unknown')
     return NextResponse.json({ error: 'Command delivery could not be confirmed. Check the session before retrying.', status: 'outcome_unknown' }, { status: 502 })
   }
 }
