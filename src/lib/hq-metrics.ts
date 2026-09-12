@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 import type { HQMetric, HQMetricsResponse, HQProjectKey, HQSourceStatus } from '@/lib/hq-types'
 
+// Only the callable contract is required, not runtime-specific static helpers.
+type FetchRequest = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>
+
 // Server-only adapter. Import from API routes, never from a client component.
 const DAY = 86_400_000
 const CACHE_TTL = 5 * 60_000
@@ -22,7 +25,7 @@ interface Window { start: Date; end: Date; cohortEnd: Date; period: string }
 interface ProviderConfig { key: string; host: string; projectId: string }
 type MetricEnvironment = Record<string, string | undefined>
 interface AdapterOptions {
-  fetch?: typeof fetch
+  fetch?: FetchRequest
   now?: () => number
   env?: () => MetricEnvironment
   timeoutMs?: number
@@ -98,7 +101,7 @@ function parseAggregates(body: unknown): Aggregates {
   return { pageviews, visitors, optIns, popupCohort, conversions, legacySignups, refreshedAt }
 }
 
-async function queryPostHog(config: ProviderConfig, now: number, fetcher: typeof fetch, timeoutMs: number): Promise<Aggregates> {
+async function queryPostHog(config: ProviderConfig, now: number, fetcher: FetchRequest, timeoutMs: number): Promise<Aggregates> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<never>((_, reject) => {
