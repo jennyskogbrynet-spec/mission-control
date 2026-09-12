@@ -62,7 +62,7 @@ def make_snapshot(inventory, usage=None):
                 ('unknown_outcome', 'unknown_outcome'), ('supplemental_hook', 'supplemental_hook_observations'),
                 ('direct_tool_invocations', 'direct_tool_invocations'), ('wrapped_command_attempts', 'wrapped_command_attempts'),
                 ('supplemental_loader_counter_total', 'supplemental_loader_counter_total'),
-            ] if source in observed and (supplemental_available.get(key, False) if key in supplemental_available else bool(native))}
+            ] if source in observed and observed[source] is not None and (supplemental_available.get(key, False) if key in supplemental_available else bool(native))}
         proposal = 'Vurder flaggene manuelt' if flags else 'Behold; vurder ved neste gjennomgang'
         if native and native.get('days_90') == 0:
             proposal = 'Ingen observert bruk på 90 dager; vurder relevans og avhengigheter før pensjonering'

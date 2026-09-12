@@ -79,6 +79,10 @@ class SnapshotImportTests(unittest.TestCase):
         with_native = adapter.make_snapshot(INVENTORY, {'skills': [obs], 'coverage': COVERAGE})
         self.assertEqual(with_native['skills'][0]['categories']['wrapped_command_attempts'], 1)
         self.assertEqual(with_native['skills'][0]['categories']['direct_tool_invocations'], 2)
+        missing = adapter.make_snapshot(INVENTORY, {'skills': [{**obs, 'supplemental_loader_counter_total': None, 'supplemental_hook_observations': None}], 'coverage': COVERAGE + [{'runtime': 'openclaw_loader_counters', 'readable': True}, {'runtime': 'claude_hook', 'files_discovered': 1}]})
+        self.assertNotIn('supplemental_loader_counter_total', missing['skills'][0]['categories'])
+        self.assertNotIn('supplemental_hook', missing['skills'][0]['categories'])
+        self.assertEqual(adapter.validate_snapshot(missing)['skills'][0]['days7'], 0)
 
     def test_duplicate_aggregate_ids_are_rejected(self):
         with self.assertRaises(ValueError):
