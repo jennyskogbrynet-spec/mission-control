@@ -17,6 +17,7 @@ describe('skill analytics privacy and coverage', () => {
     expect(parseSkillAnalytics(snapshot, 2)).toBeNull()
     expect(parseSkillAnalytics({ ...snapshot, version: 2 }, 1)).toBeNull()
     expect(parseSkillAnalytics({ ...snapshot, skills: [{ ...row, days7: -1 }] }, 1)).toBeNull()
+    expect(parseSkillAnalytics({ ...snapshot, skills: [row, { ...row, name: 'other' }] }, 1)).toBeNull()
   })
 
   it('returns unavailable on missing snapshot and refuses other workspaces even with spoofed owner', async () => {

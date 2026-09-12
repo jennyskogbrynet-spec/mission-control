@@ -28,6 +28,7 @@ const snapshotSchema = z.object({
 export function parseSkillAnalytics(input: unknown, workspaceId: number): SkillAnalyticsSnapshot | null {
   const parsed = snapshotSchema.safeParse(input)
   if (!parsed.success || parsed.data.workspaceId !== workspaceId) return null
+  if (new Set(parsed.data.skills.map(skill => skill.id)).size !== parsed.data.skills.length) return null
   return parsed.data
 }
 
