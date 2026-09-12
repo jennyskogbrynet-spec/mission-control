@@ -97,6 +97,15 @@ describe('scanForSecrets', () => {
 })
 
 describe('redactSecrets', () => {
+  it.each(['', 'RSA ', 'EC ', 'DSA ', 'OPENSSH '])('masks the complete %sPEM span, including overlapping credentials', (kind) => {
+    const body = 'SYNTHETIC_BODY_' + 'Z'.repeat(80) + 'AKIAIOSFODNN7EXAMPLE'
+    const pem = `-----BEGIN ${kind}PRIVATE KEY-----\n${body}\n-----END ${kind}PRIVATE KEY-----`
+    const result = redactSecrets(`before ${pem} after`)
+    expect(result).toBe('before -----B***REDACTED***--- after')
+    expect(result).not.toContain('SYNTHETIC_BODY_')
+    expect(result).not.toContain('AKIAIOSFODNN7EXAMPLE')
+  })
+
   it('masks AWS keys in text', () => {
     const text = 'Key is AKIAIOSFODNN7EXAMPLE here'
     const result = redactSecrets(text)

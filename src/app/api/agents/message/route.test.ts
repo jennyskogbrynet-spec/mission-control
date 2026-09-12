@@ -93,6 +93,22 @@ describe('direct command API', () => {
     expect(mock.security).toHaveBeenCalledTimes(profile === 'standard' ? 1 : 0)
   })
 
+  it.each(['standard', 'minimal'])('removes the complete PEM body from the %s notification preview', async (profile) => {
+    mock.settings.mockReturnValue({ value: profile })
+    const body = 'SYNTHETIC_BODY_' + 'Z'.repeat(80) + credential
+    const pem = `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`
+    const response = await POST(request({ to: 'Research', message: pem }))
+    expect(response.status).toBe(200)
+    expect(mock.send).toHaveBeenCalledTimes(1)
+    expect(mock.send.mock.calls[0][1]).toContain(pem)
+    expect(mock.notification).toHaveBeenCalledTimes(1)
+    const preview = mock.notification.mock.calls[0][3]
+    expect(preview).toContain('REDACTED')
+    expect(preview).not.toContain('SYNTHETIC_BODY_')
+    expect(preview).not.toContain('ZZZZ')
+    expect(preview).not.toContain(credential)
+  })
+
   it.each([2, undefined])('rejects nonprimary or missing workspace %s before accessing global policy or gateway', async (workspace) => {
     mock.auth.mockReturnValue({ user: { ...mock.actor, workspace_id: workspace } })
     const response = await POST(request({ to: 'Research', message: credential }))

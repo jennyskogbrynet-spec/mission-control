@@ -102,15 +102,32 @@ export function scanForSecrets(text: string): SecretMatch[] {
 }
 
 export function redactSecrets(text: string): string {
-  let result = text
+  // Match the original input before masking: a header match must not hide a
+  // later full PEM match, and nested credentials must redact their whole span.
+  const spans: { start: number; end: number }[] = []
   for (const pattern of SECRET_PATTERNS) {
     pattern.regex.lastIndex = 0
-    result = result.replace(pattern.regex, (match) => {
-      if (match.length > 12) {
-        return match.slice(0, 6) + '***REDACTED***' + match.slice(-3)
-      }
-      return match.slice(0, 3) + '***REDACTED***'
-    })
+    let match: RegExpExecArray | null
+    while ((match = pattern.regex.exec(text)) !== null) {
+      spans.push({ start: match.index, end: match.index + match[0].length })
+    }
   }
-  return result
+  spans.sort((a, b) => a.start - b.start || b.end - a.end)
+  const merged: typeof spans = []
+  for (const span of spans) {
+    const previous = merged[merged.length - 1]
+    if (previous && span.start < previous.end) previous.end = Math.max(previous.end, span.end)
+    else merged.push({ ...span })
+  }
+  let result = ''
+  let cursor = 0
+  for (const span of merged) {
+    const match = text.slice(span.start, span.end)
+    const masked = match.length > 12
+      ? match.slice(0, 6) + '***REDACTED***' + match.slice(-3)
+      : match.slice(0, 3) + '***REDACTED***'
+    result += text.slice(cursor, span.start) + masked
+    cursor = span.end
+  }
+  return result + text.slice(cursor)
 }
