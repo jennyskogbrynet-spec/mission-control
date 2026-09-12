@@ -112,7 +112,10 @@ export async function GET(
     // Parse JSON fields
     const taskWithParsedData = mapTaskRow(task);
     
-    return NextResponse.json({ task: taskWithParsedData });
+    return NextResponse.json({
+      task: taskWithParsedData,
+      capabilities: { task_update_guards: ['task-owner-claim-v1'] },
+    });
   } catch (error) {
     logger.error({ err: error }, 'GET /api/tasks/[id] error');
     return NextResponse.json({ error: 'Failed to fetch task' }, { status: 500 });
@@ -140,6 +143,12 @@ export async function PUT(
     const validated = await validateBody(request, updateTaskSchema);
     if ('error' in validated) return validated.error;
     const body = validated.data;
+    // This capability guards metadata only; reject mixed updates before any
+    // project-counter allocation or other mutation can occur.
+    if (body.mutation_guard && (body.metadata === undefined
+      || Object.keys(body).some((key) => key !== 'metadata' && key !== 'mutation_guard'))) {
+      return NextResponse.json({ error: 'Owner/claim guard requires a metadata-only update' }, { status: 400 })
+    }
     
     if (isNaN(taskId)) {
       return NextResponse.json({ error: 'Invalid task ID' }, { status: 400 });
@@ -172,7 +181,8 @@ export async function PUT(
       retry_count,
       completed_at,
       tags,
-      metadata
+      metadata,
+      mutation_guard
     } = body;
     const normalizedStatus = normalizeTaskUpdateStatus({
       currentStatus: currentTask.status,
@@ -335,6 +345,9 @@ export async function PUT(
     fieldsToUpdate.push('updated_at = ?');
     updateParams.push(now);
     updateParams.push(taskId, workspaceId);
+    if (mutation_guard) {
+      updateParams.push(mutation_guard.claimed_by, mutation_guard.claimed_at)
+    }
     
     if (fieldsToUpdate.length === 1) { // Only updated_at
       return NextResponse.json({
@@ -347,9 +360,16 @@ export async function PUT(
       UPDATE tasks 
       SET ${fieldsToUpdate.join(', ')}
       WHERE id = ? AND workspace_id = ?
+      ${mutation_guard ? 'AND claimed_by IS ? AND claimed_at IS ?' : ''}
     `);
     
-    stmt.run(...updateParams);
+    const updateResult = stmt.run(...updateParams);
+    if (mutation_guard && updateResult.changes !== 1) {
+      return NextResponse.json({
+        error: 'Task ownership or claim incarnation changed',
+        code: 'task_owner_claim_changed',
+      }, { status: 409 })
+    }
     
     // Track changes and log activities
     const changes: string[] = [];

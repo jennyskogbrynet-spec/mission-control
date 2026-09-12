@@ -96,6 +96,11 @@ export const createTaskSchema = z.object({
 })
 
 export const updateTaskSchema = z.object({
+  mutation_guard: z.object({
+    capability: z.literal('task-owner-claim-v1'),
+    claimed_by: z.string().max(100).nullable(),
+    claimed_at: z.string().datetime({ offset: true }).nullable(),
+  }).strict().optional(),
   title: z.string().min(1, 'Title is required').max(500).optional(),
   description: z.string().max(5000).optional(),
   status: z.enum(['backlog', 'inbox', 'assigned', 'awaiting_owner', 'in_progress', 'review', 'quality_review', 'done', 'failed']).optional(),
