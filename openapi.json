@@ -6581,6 +6581,33 @@
         }
       }
     },
+    "/api/skills/analytics": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "Read local skill analytics for the authenticated primary workspace",
+        "description": "Returns a version1 sanitized aggregate snapshot or an explicit unavailable state. Other workspaces cannot read shared local snapshots. Responses are private and not cached.",
+        "operationId": "getApiSkillsAnalytics",
+        "responses": {
+          "200": {
+            "description": "Ready snapshot or unavailable coverage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "snapshot"],
+                  "properties": {
+                    "status": { "type": "string", "enum": ["ready", "unavailable"] },
+                    "snapshot": { "type": ["object", "null"], "description": "Version1 aggregate schema documented in docs/skill-analytics.md and src/lib/skill-analytics-types.ts" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
     "/api/skills/registry": {
       "get": {
         "tags": [

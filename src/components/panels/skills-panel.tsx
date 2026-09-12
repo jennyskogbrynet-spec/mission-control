@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { useTranslations } from 'next-intl'
 import { useMissionControl } from '@/store'
 import { Button } from '@/components/ui/button'
+import { SkillAnalyticsPanel } from './skill-analytics-panel'
 
 interface SkillSummary {
   id: string
@@ -48,7 +49,7 @@ interface RegistrySkill {
   tags?: string[]
 }
 
-type PanelTab = 'installed' | 'registry'
+type PanelTab = 'installed' | 'registry' | 'analytics'
 
 const SOURCE_LABELS: Record<string, string> = {
   'user-agents': '~/.agents/skills (global)',
@@ -423,8 +424,11 @@ export function SkillsPanel() {
           >
             {t('tabRegistry')}
           </button>
+          <button onClick={() => setActiveTab('analytics')} className={`px-3 py-1.5 text-xs rounded-md transition-colors ${activeTab === 'analytics' ? 'bg-primary text-primary-foreground' : 'bg-secondary/50 text-muted-foreground hover:text-foreground'}`}>Statistikk</button>
         </div>
       </div>
+
+      {activeTab === 'analytics' && <SkillAnalyticsPanel />}
 
       {installMessage && (
         <div className={`rounded-lg border px-4 py-2 text-xs ${
