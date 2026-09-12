@@ -18,6 +18,8 @@ describe('skill analytics privacy and coverage', () => {
     expect(parseSkillAnalytics({ ...snapshot, version: 2 }, 1)).toBeNull()
     expect(parseSkillAnalytics({ ...snapshot, skills: [{ ...row, days7: -1 }] }, 1)).toBeNull()
     expect(parseSkillAnalytics({ ...snapshot, skills: [row, { ...row, name: 'other' }] }, 1)).toBeNull()
+    for (const field of ['name', 'proposal'] as const) expect(parseSkillAnalytics({ ...snapshot, skills: [{ ...row, [field]: '/synthetic/private/SKILL.md' }] }, 1)).toBeNull()
+    expect(parseSkillAnalytics({ ...snapshot, skills: [{ ...row, flags: ['Review /synthetic/private/SKILL.md'] }] }, 1)).toBeNull()
   })
 
   it('returns unavailable on missing snapshot and refuses other workspaces even with spoofed owner', async () => {
@@ -27,9 +29,15 @@ describe('skill analytics privacy and coverage', () => {
       expect(await readSkillAnalytics(1)).toEqual({ status: 'unavailable', snapshot: null })
       await writeFile(join(dir, 'snapshot.json'), JSON.stringify({ ...snapshot, workspaceId: 2 }))
       expect(await readSkillAnalytics(2)).toEqual({ status: 'unavailable', snapshot: null })
-      expect(await readSkillAnalytics(1)).toEqual({ status: 'unavailable', snapshot: null })
+      expect(await readSkillAnalytics(1)).toEqual({ status: 'invalid', snapshot: null })
+      await writeFile(join(dir, 'snapshot.json'), 'malformed')
+      expect(await readSkillAnalytics(1)).toEqual({ status: 'invalid', snapshot: null })
+      await writeFile(join(dir, 'snapshot.json'), ' '.repeat(10 * 1024 * 1024 + 1))
+      expect(await readSkillAnalytics(1)).toEqual({ status: 'invalid', snapshot: null })
       await writeFile(join(dir, 'snapshot.json'), JSON.stringify(snapshot))
       expect((await readSkillAnalytics(1)).snapshot?.coverage.status).toBe('partial')
+      vi.stubEnv('MC_SKILL_ANALYTICS_SNAPSHOT', dir)
+      expect(await readSkillAnalytics(1)).toEqual({ status: 'error', snapshot: null })
     } finally { await rm(dir, { recursive: true }) }
   })
 

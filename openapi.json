@@ -6596,7 +6596,7 @@
                   "type": "object",
                   "required": ["status", "snapshot"],
                   "properties": {
-                    "status": { "type": "string", "enum": ["ready", "unavailable"] },
+                    "status": { "type": "string", "enum": ["ready", "unavailable", "invalid", "error"] },
                     "snapshot": { "type": ["object", "null"], "description": "Version1 aggregate schema documented in docs/skill-analytics.md and src/lib/skill-analytics-types.ts" }
                   }
                 }

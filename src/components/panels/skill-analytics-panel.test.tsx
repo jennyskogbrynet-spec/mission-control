@@ -4,6 +4,15 @@ import { SkillAnalyticsPanel } from './skill-analytics-panel'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 describe('skill analytics panel', () => {
+  it.each([
+    ['invalid', 'Statistikkfilen er ugyldig. Generer et nytt gyldig øyeblikksbilde.'],
+    ['error', 'Kunne ikke lese statistikk. Kontroller integrasjonen og prøv igjen.'],
+  ])('shows sanitized %s integration state', async (status, message) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status, snapshot: null }) }))
+    render(<SkillAnalyticsPanel />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    expect(screen.queryByText('Ingen gyldig statistikkfil er konfigurert for dette arbeidsområdet.')).not.toBeInTheDocument()
+  })
   it('shows honest coverage and supports search and numeric column sorting', async () => {
     const base = { origins: ['local'], status: ['installed_local'], categories: { document_read: 1 }, lastUse: null, days30: 2, days90: 2, sessions: 1, words: 20, bytes: 100, flags: [], proposal: 'Vurder' }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ready', snapshot: { version: 1, workspaceId: 1, generatedAt: '2026-09-12T20:00:00Z', coverage: { status: 'partial', sources: ['codex'], limitations: ['Kun lokale spor'] }, skills: [

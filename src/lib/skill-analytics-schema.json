@@ -1,0 +1,201 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "workspaceId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "partial",
+            "complete",
+            "unavailable"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": "^[^/\\\\]*$"
+          },
+          "maxItems": 20
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": "^[^/\\\\]*$"
+          },
+          "maxItems": 30
+        }
+      },
+      "required": [
+        "status",
+        "sources",
+        "limitations"
+      ],
+      "additionalProperties": false
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": "^[^/\\\\]*$"
+          },
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 300,
+              "pattern": "^[^/\\\\]*$"
+            },
+            "maxItems": 30
+          },
+          "status": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 300,
+              "pattern": "^[^/\\\\]*$"
+            },
+            "maxItems": 30
+          },
+          "categories": {
+            "type": "object",
+            "patternProperties": {
+              "^[a-zA-Z0-9_-]{1,60}$": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          },
+          "lastUse": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "days7": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "days30": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "days90": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "words": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 150,
+              "pattern": "^[a-z0-9_]+$"
+            },
+            "maxItems": 50
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": "^[^/\\\\]*$"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "origins",
+          "status",
+          "categories",
+          "lastUse",
+          "days7",
+          "days30",
+          "days90",
+          "sessions",
+          "words",
+          "bytes",
+          "flags",
+          "proposal"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 10000
+    }
+  },
+  "required": [
+    "version",
+    "workspaceId",
+    "generatedAt",
+    "coverage",
+    "skills"
+  ],
+  "additionalProperties": false
+}

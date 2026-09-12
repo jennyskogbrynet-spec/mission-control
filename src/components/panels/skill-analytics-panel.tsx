@@ -8,12 +8,12 @@ const columns: Array<{ key: AnalyticsSort; label: string }> = [
   { key: 'days7', label: '7 dager' }, { key: 'days30', label: '30 dager' },
   { key: 'days90', label: '90 dager' }, { key: 'sessions', label: 'Sesjoner' }, { key: 'words', label: 'Kontekststørrelse' },
 ]
-const categoryLabels: Record<string, string> = { explicit_invocation: 'Invokasjoner', document_read: 'Skill-dokument lest', script_execution: 'Skriptkjøring', completed_tool_calls: 'Fullførte verktøykall', failed_tool_calls: 'Feilede verktøykall', unknown_outcome: 'Ukjent utfall', supplemental_hook: 'Supplerende hook' }
+const categoryLabels: Record<string, string> = { explicit_invocation: 'Invokasjoner', document_read: 'Skill-dokument lest', script_execution: 'Skriptkjøring', completed_tool_calls: 'Fullførte verktøykall', failed_tool_calls: 'Feilede verktøykall', unknown_outcome: 'Ukjent utfall', supplemental_hook: 'Supplerende hook', direct_tool_invocations: 'Direkte verktøyinvokasjoner', wrapped_command_attempts: 'Innrammede kommandoforsøk', supplemental_loader_counter_total: 'Supplerende kumulative loader-tall' }
 const observed = (value: number | null) => value === null ? 'Ukjent' : value.toLocaleString()
 
 export function SkillAnalyticsPanel() {
   const [snapshot, setSnapshot] = useState<SkillAnalyticsSnapshot | null>(null)
-  const [state, setState] = useState<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
+  const [state, setState] = useState<'loading' | 'ready' | 'unavailable' | 'invalid' | 'error'>('loading')
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<AnalyticsSort>('name')
   const [descending, setDescending] = useState(false)
@@ -43,7 +43,8 @@ export function SkillAnalyticsPanel() {
     </div>
     <p className="text-xs text-muted-foreground">Tallene gjelder dokumenterte observasjoner i innsamlede lokale spor. En omtale beviser ikke kjøring. Ukjent betyr manglende dekning; null betyr ingen observasjon i de dekkede sporene. Kontekststørrelse er ord og byte i SKILL.md, ikke målte tokens.</p>
     {state === 'loading' && <p role="status">Laster statistikk…</p>}
-    {state === 'error' && <p role="alert">Kunne ikke laste statistikk. Oppdater for å prøve igjen.</p>}
+    {state === 'error' && <p role="alert">Kunne ikke lese statistikk. Kontroller integrasjonen og prøv igjen.</p>}
+    {state === 'invalid' && <p role="alert">Statistikkfilen er ugyldig. Generer et nytt gyldig øyeblikksbilde.</p>}
     {state === 'unavailable' && <p role="status">Ingen gyldig statistikkfil er konfigurert for dette arbeidsområdet.</p>}
     {state === 'ready' && snapshot && <>
       <div className="rounded-lg border border-border p-3 text-xs space-y-1">
