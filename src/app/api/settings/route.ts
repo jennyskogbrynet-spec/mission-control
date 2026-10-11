@@ -41,6 +41,9 @@ const settingDefinitions: Record<string, { category: string; description: string
   'general.auto_cleanup': { category: 'general', description: 'Enable automatic data cleanup', default: 'false' },
   'general.auto_backup': { category: 'general', description: 'Enable automatic daily backups', default: 'false' },
   'general.backup_retention_count': { category: 'general', description: 'Number of backup files to keep', default: '10' },
+  'general.claim_lease_sweep': { category: 'general', description: 'Release task claims that nobody has touched for the claim lease (see general.claim_lease_hours)', default: 'false' },
+  'general.claim_lease_hours': { category: 'general', description: 'Hours without task activity after which a claim is released (1-2160)', default: '72' },
+  'intake.wip_caps': { category: 'general', description: 'JSON per-source cap on open tasks, e.g. {"feature-audit":15,"seo-radar":{"cap":5,"on_cap":"reject"},"deep-verify":0}. Empty = defaults. 0 = unlimited.', default: '' },
 
   // Subscription overrides
   'subscription.plan_override': { category: 'general', description: 'Override auto-detected subscription plan (e.g. max, max_5x, pro)', default: '' },

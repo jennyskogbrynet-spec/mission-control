@@ -12768,6 +12768,332 @@
         }
       }
     },
+    "/api/tasks/claim-leases": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Report claims whose lease has expired",
+        "operationId": "getTaskClaimLeases",
+        "description": "Read-only. Requires viewer access. A claim's lease runs from the newest task activity (task update, claim, comment, activity-log row, quality review, run). Reports claims idle for at least lease_hours, and claims that would be expired but are protected by an active run or a live native worker.",
+        "parameters": [
+          {
+            "name": "lease_hours",
+            "in": "query",
+            "required": false,
+            "description": "Lease length in hours (1-2160). Default: setting general.claim_lease_hours, else env MC_CLAIM_LEASE_HOURS, else 72.",
+            "schema": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 2160
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lease evaluation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "applied, lease_hours, evaluated, within_lease, protected[], expired[], released[], skipped_changed[], native_journal",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "The evaluation failed."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Release claims whose lease has expired",
+        "operationId": "sweepTaskClaimLeases",
+        "description": "Requires operator access. Dry run unless apply is exactly true. Releases expired claims to Unclaimed with a comment and an activity record; retry_count and status are unchanged. Never releases a claim with an active run or live native worker. Answers 409 when apply is requested while the controller journal cannot be read.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "apply": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "lease_hours": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 2160
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sweep result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same shape as GET, with released[] filled when apply is true.",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Controller journal unreadable; nothing was released."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "The sweep failed."
+          }
+        }
+      }
+    },
+    "/api/tasks/closure-candidates": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Open tasks whose linked pull requests are all merged",
+        "operationId": "getTaskClosureCandidates",
+        "description": "Read-only; never calls GitHub. Judges every non-done task in the workspace (optionally one project) against the PR states in the snapshot file written by scripts/mc-factory-hygiene.mjs. Without a snapshot every PR is unknown, nothing is a candidate and needs_lookup lists what to look up.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "description": "Project slug.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum entries per list (default 200, max 500).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closure report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "report{totals, candidates[], awaiting_review[], failed_but_shipped[], held[], needs_lookup[]}, snapshot, native_journal",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "The report failed."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Preview or apply the closure sweep",
+        "operationId": "applyTaskClosureSweep",
+        "description": "Requires operator access. Dry run unless apply is exactly true. The server recomputes candidates from pr_states (or the snapshot file); task_ids can only narrow the set. Candidates move to review, never done, with an evidence comment. With backfill_pr_numbers the unused tasks.github_pr_number column is filled where exactly one PR is linked; updated_at is not touched. Answers 409 when apply is requested while the controller journal cannot be read.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "pr_states": {
+                    "type": "object",
+                    "description": "Keyed owner/repo#number: {status: merged|open|closed|not_found|error, merged_at, merge_commit_sha, base_ref}.",
+                    "additionalProperties": true
+                  },
+                  "apply": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "task_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "backfill_pr_numbers": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "lease_hours": {
+                    "type": "number"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Report plus the applied result when apply was true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "dry_run, report, snapshot, applied, backfill",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Controller journal unreadable; nothing was changed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "The sweep failed."
+          }
+        }
+      }
+    },
+    "/api/tasks/intake-wip": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Open tasks per intake source against the WIP caps",
+        "operationId": "getTaskIntakeWip",
+        "description": "Read-only. Requires viewer access. Effective caps (defaults, then env MC_INTAKE_WIP_CAPS, then setting intake.wip_caps) and, per project and metadata.source, open and deferred counts.",
+        "responses": {
+          "200": {
+            "description": "Caps and counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "rules, rows[]",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "The report failed."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Promote deferred intake tasks that now fit under the cap",
+        "operationId": "promoteDeferredIntakeTasks",
+        "description": "Requires operator access. Dry run unless apply is exactly true. Moves the oldest wip_deferred backlog tasks back to the status they were filed with, as many as fit under each source's cap.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "apply": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "project_id": {
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "maximum": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Promotion plan and result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "dry_run, plan, result",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "description": "The promotion failed."
+          }
+        }
+      }
+    },
     "/api/tasks/sweep-stalled": {
       "post": {
         "tags": [

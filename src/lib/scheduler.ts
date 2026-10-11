@@ -12,6 +12,7 @@ import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
+import { CLAIM_LEASE_SWEEP_SETTING, readActiveNativeWorkerTaskIds, readClaimLeaseHours, sweepExpiredClaims } from './claim-lease'
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
@@ -48,6 +49,34 @@ function getSettingNumber(key: string, defaultValue: number): number {
     return defaultValue
   } catch {
     return defaultValue
+  }
+}
+
+/**
+ * Release claims that nobody has touched for the lease period (default 72 h, setting
+ * `general.claim_lease_hours`). Off by default: enable with `general.claim_lease_sweep=true`
+ * after one reviewed manual pass (POST /api/tasks/claim-leases). Never releases a claim
+ * with an active run or native worker; if the controller journal cannot be read, it
+ * releases nothing. See src/lib/claim-lease.ts.
+ */
+async function runClaimLeaseSweep(): Promise<{ ok: boolean; message: string }> {
+  const db = getDatabase()
+  const leaseHours = readClaimLeaseHours(db)
+  const native = readActiveNativeWorkerTaskIds()
+  if (!native.ok) return { ok: false, message: `Claim lease sweep skipped: ${native.reason}` }
+  const result = sweepExpiredClaims(db, {
+    apply: true,
+    leaseHours,
+    activeNativeTaskIds: native.ids,
+    actor: 'claim-lease',
+    broadcast: (event, payload) => eventBus.broadcast(event, payload),
+  })
+  if (result.released.length > 0) {
+    logger.warn({ released: result.released, lease_hours: leaseHours }, 'claim lease sweep released expired claims')
+  }
+  return {
+    ok: true,
+    message: `Claim lease ${leaseHours}h: ${result.released.length} released, ${result.protected.length} protected, ${result.within_lease} within lease of ${result.evaluated} held`,
   }
 }
 
@@ -426,6 +455,15 @@ export function initScheduler() {
     running: false,
   })
 
+  tasks.set('claim_lease_sweep', {
+    name: 'Claim Lease Sweep',
+    intervalMs: 15 * 60_000, // Every 15 min — release claims idle past the lease
+    lastRun: null,
+    nextRun: now + 5 * 60_000,
+    enabled: true,
+    running: false,
+  })
+
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
   logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
@@ -460,6 +498,7 @@ async function tick() {
       : id === 'task_dispatch' ? 'general.task_dispatch'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
+      : id === 'claim_lease_sweep' ? CLAIM_LEASE_SWEEP_SETTING
       : 'general.agent_heartbeat'
     const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
@@ -483,6 +522,7 @@ async function tick() {
           })
         : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
         : id === 'stale_task_requeue' ? await requeueStaleTasks()
+        : id === 'claim_lease_sweep' ? await runClaimLeaseSweep()
         : await runCleanup()
       task.lastResult = { ...result, timestamp: now }
     } catch (err: any) {
@@ -518,6 +558,7 @@ export function getSchedulerStatus() {
       : id === 'task_dispatch' ? 'general.task_dispatch'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
+      : id === 'claim_lease_sweep' ? CLAIM_LEASE_SWEEP_SETTING
       : 'general.agent_heartbeat'
     const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
@@ -548,6 +589,7 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
   if (taskId === 'aegis_review') return { ok: false, message: 'Aegis auto-review was removed 2026-07-31 (unbounded retry loop drained the codex quota). Review tasks manually.' }
   if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
   if (taskId === 'stale_task_requeue') return requeueStaleTasks()
+  if (taskId === 'claim_lease_sweep') return runClaimLeaseSweep()
   return { ok: false, message: `Unknown task: ${taskId}` }
 }
 

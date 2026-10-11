@@ -11,6 +11,7 @@ import { pushTaskToGitHub, syncTaskOutbound } from '@/lib/github-sync-engine';
 import { pushTaskToGnap } from '@/lib/gnap-sync';
 import { config } from '@/lib/config';
 import { normalizeTaskMetadata } from '@/lib/mc-agentic-os';
+import { decideIntake, deferredMetadata, rejectionMessage, stripWipOwnedKeys } from '@/lib/intake-wip';
 
 function formatTicketRef(prefix?: string | null, num?: number | null): string | undefined {
   if (!prefix || typeof num !== 'number' || !Number.isFinite(num) || num <= 0) return undefined
@@ -237,13 +238,38 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const resolvedCompletedAt = completed_at ?? (normalizedStatus === 'done' ? now : null)
-    const normalizedMetadata = normalizeTaskMetadata(metadata, {
+    // Intake cap (see src/lib/intake-wip.ts). Decided and inserted without an await
+    // in between, so two creates cannot both see room for one slot.
+    const incomingMetadata = stripWipOwnedKeys(metadata as Record<string, unknown>)
+    const intake = decideIntake(db, {
+      workspaceId,
+      projectId: resolvedProjectId,
+      status: normalizedStatus,
+      metadata: incomingMetadata,
+    })
+    if (intake.action === 'reject') {
+      return NextResponse.json({
+        error: rejectionMessage(intake, resolvedProjectId),
+        code: 'intake_wip_cap',
+        source: intake.source,
+        open: intake.open,
+        cap: intake.rule?.cap ?? null,
+        project_id: resolvedProjectId,
+      }, { status: 409 });
+    }
+    const wipDeferred = intake.action === 'defer'
+    const createStatus = wipDeferred ? 'backlog' : normalizedStatus
+    const createMetadata = wipDeferred
+      ? { ...incomingMetadata, ...deferredMetadata(intake, new Date().toISOString()) }
+      : incomingMetadata
+
+    const resolvedCompletedAt = completed_at ?? (createStatus === 'done' ? now : null)
+    const normalizedMetadata = normalizeTaskMetadata(createMetadata, {
       title,
       description,
       assigned_to,
       priority,
-      status: normalizedStatus,
+      status: createStatus,
       tags,
     })
 
@@ -271,7 +297,7 @@ export async function POST(request: NextRequest) {
       const dbResult = insertStmt.run(
         title,
         description,
-        normalizedStatus,
+        createStatus,
         priority,
         resolvedProjectId,
         row.ticket_counter,
@@ -301,10 +327,11 @@ export async function POST(request: NextRequest) {
     // Log activity
     db_helpers.logActivity('task_created', 'task', taskId, actor, `Created task: ${title}`, {
       title,
-      status: normalizedStatus,
+      status: createStatus,
       priority,
       assigned_to,
-      ...(outcome ? { outcome } : {})
+      ...(outcome ? { outcome } : {}),
+      ...(wipDeferred ? { wip_deferred: true, requested_status: normalizedStatus } : {})
     }, workspaceId);
 
     if (actor) {
@@ -325,8 +352,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create notification if assigned
-    if (assigned_to) {
+    // Create notification if assigned (a task parked by the intake cap is not dispatched, so it does not announce itself)
+    if (assigned_to && !wipDeferred) {
       db_helpers.ensureTaskSubscription(taskId, assigned_to, workspaceId)
       db_helpers.createNotification(
         assigned_to,
@@ -371,6 +398,19 @@ export async function POST(request: NextRequest) {
     // Broadcast to SSE clients
     eventBus.broadcast('task.created', parsedTask);
 
+    if (wipDeferred) {
+      return NextResponse.json({
+        task: parsedTask,
+        wip: {
+          deferred: true,
+          source: intake.source,
+          open: intake.open,
+          cap: intake.rule?.cap ?? null,
+          requested_status: intake.requested_status,
+          status: createStatus,
+        },
+      }, { status: 201, headers: { 'X-MC-Intake': 'deferred' } });
+    }
     return NextResponse.json({ task: parsedTask }, { status: 201 });
   } catch (error) {
     logger.error({ err: error }, 'POST /api/tasks error');
