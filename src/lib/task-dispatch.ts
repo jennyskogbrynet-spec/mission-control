@@ -86,6 +86,16 @@ export function getAgentInvocationBudget(): { used: number; cap: number; exceede
   return { used, cap, exceeded: used >= cap }
 }
 
+/** The same numbers as getAgentInvocationBudget(), read-only (never creates the table): for the plan. */
+function readAgentInvocationBudget(db: ReturnType<typeof getDatabase>): { used: number; cap: number; exceeded: boolean } {
+  const cap = getAgentInvocationDailyCap(db)
+  let used = 0
+  try {
+    used = (db.prepare('SELECT COUNT(*) as n FROM agent_invocations WHERE ts >= ?').get(Math.floor(Date.now() / 1000) - 24 * 60 * 60) as { n: number }).n
+  } catch { /* no ledger yet: nothing used */ }
+  return { used, cap, exceeded: used >= cap }
+}
+
 /** Record one scheduler-started agent invocation against the 24h budget. */
 function recordAgentInvocation(source: string, taskId: number | null): void {
   const db = getDatabase()
@@ -745,6 +755,8 @@ const ROUTE_BATCH_LIMIT = 5
 
 type SelectedForDispatch = DispatchableTask & { tags?: string; created_at?: number; via?: 'assigned' | 'routed_this_tick' }
 export interface DispatchSkip { id: number; reason: string; detail?: string }
+/** `in_progress` counts the eligible set under approved_only (the cap), `in_progress_total` every lane. */
+export interface DispatchWip { in_progress: number; in_progress_total: number; max: number | null; free: number | null }
 
 const ASSIGNED_SELECT = `
     SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
@@ -782,10 +794,10 @@ export function selectAssignedForDispatch(
   db: ReturnType<typeof getDatabase>,
   ctx: DispatchScopeContext,
   routed: Array<{ id: number; agent: string }> = [],
-): { tasks: SelectedForDispatch[]; skipped: DispatchSkip[]; wip: { in_progress: number; max: number | null; free: number | null } } {
+): { tasks: SelectedForDispatch[]; skipped: DispatchSkip[]; wip: DispatchWip } {
   const skipped: DispatchSkip[] = []
   if (ctx.held_reason || (ctx.eligible_ids && ctx.eligible_ids.size === 0)) {
-    return { tasks: [], skipped, wip: { in_progress: countInProgress(db), max: APPROVED_ONLY_WIP_MAX, free: 0 } }
+    return { tasks: [], skipped, wip: { in_progress: 0, in_progress_total: countInProgress(db), max: APPROVED_ONLY_WIP_MAX, free: 0 } }
   }
 
   let rows: SelectedForDispatch[]
@@ -825,14 +837,15 @@ export function selectAssignedForDispatch(
     eligible.push(row)
   }
 
+  const total = countInProgress(db)
   if (ctx.eligible_ids === null) {
-    return { tasks: eligible.slice(0, DISPATCH_BATCH_LIMIT), skipped, wip: { in_progress: countInProgress(db), max: null, free: null } }
+    return { tasks: eligible.slice(0, DISPATCH_BATCH_LIMIT), skipped, wip: { in_progress: total, in_progress_total: total, max: null, free: null } }
   }
-  const inProgress = countInProgress(db)
+  const inProgress = countInProgress(db, ctx.eligible_ids)
   const free = Math.max(0, APPROVED_ONLY_WIP_MAX - inProgress)
   const take = Math.min(free, DISPATCH_BATCH_LIMIT)
   for (const row of eligible.slice(take)) skipped.push({ id: row.id, reason: free === 0 ? 'wip_cap' : 'batch_limit' })
-  return { tasks: eligible.slice(0, take), skipped, wip: { in_progress: inProgress, max: APPROVED_ONLY_WIP_MAX, free } }
+  return { tasks: eligible.slice(0, take), skipped, wip: { in_progress: inProgress, in_progress_total: total, max: APPROVED_ONLY_WIP_MAX, free } }
 }
 
 /**
@@ -856,7 +869,7 @@ function noteDispatchHeld(db: ReturnType<typeof getDatabase>, ctx: DispatchScope
 function stillAllowed(
   db: ReturnType<typeof getDatabase>,
   taskId: number,
-  opts: { wip: boolean } = { wip: true },
+  opts: { wip: boolean; assignedTo?: string | null } = { wip: true },
 ): { ok: true } | { ok: false; stop: boolean; message: string } {
   const live = resolveDispatchScope(db)
   if (!live.enabled) return { ok: false, stop: true, message: DISPATCH_OFF_MESSAGE }
@@ -866,7 +879,11 @@ function stillAllowed(
   }
   if (live.eligible_ids !== null) {
     if (!live.eligible_ids.has(taskId)) return { ok: false, stop: false, message: `task ${taskId} is no longer approved` }
-    if (opts.wip && countInProgress(db) >= APPROVED_ONLY_WIP_MAX) return { ok: false, stop: true, message: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached` }
+    const owner = live.listed_owners.get(taskId)
+    if (opts.assignedTo !== undefined && owner !== undefined && opts.assignedTo !== owner) {
+      return { ok: false, stop: false, message: `task ${taskId} is approved for ${owner}, not ${opts.assignedTo}` }
+    }
+    if (opts.wip && countInProgress(db, live.eligible_ids) >= APPROVED_ONLY_WIP_MAX) return { ok: false, stop: true, message: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached` }
   }
   return { ok: true }
 }
@@ -914,7 +931,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     if (isManagedComputeTask(task.metadata)) continue
     // An earlier task in this batch may have run for minutes. The kill switch, the
     // approved list and the WIP cap are re-read right before every claim.
-    const allowed = stillAllowed(db, task.id)
+    const allowed = stillAllowed(db, task.id, { wip: true, assignedTo: task.assigned_to })
     if (!allowed.ok) {
       if (allowed.stop) { stoppedBy = allowed.message; break }
       continue
@@ -1285,7 +1302,7 @@ export function planInboxRouting(
     ORDER BY
       CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
       created_at ASC, id ASC
-    LIMIT ${ROUTE_BATCH_LIMIT}
+    ${scoped ? '' : `LIMIT ${ROUTE_BATCH_LIMIT}`}
   `).all(...(scoped ? [JSON.stringify([...ctx.eligible_ids!])] : [])) as InboxRow[]
 
   if (inboxTasks.length === 0) return { inbox: [], agentsAvailable: 0, decisions: [], skipped }
@@ -1360,6 +1377,11 @@ export function planInboxRouting(
     }
     decisions.push({ task, agent: scored[0].agent, score: scored[0].score, via: 'score' })
   }
+  // Under approved_only every eligible inbox task is read (the set is small), so an
+  // unroutable child cannot hold a slot; the per-tick limit applies to the decisions.
+  if (scoped && decisions.length > ROUTE_BATCH_LIMIT) {
+    for (const d of decisions.splice(ROUTE_BATCH_LIMIT)) skipped.push({ id: d.task.id, reason: 'route_batch_limit' })
+  }
   return { inbox: inboxTasks, agentsAvailable: agents.length, decisions, skipped }
 }
 
@@ -1393,7 +1415,7 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
   const now = Math.floor(Date.now() / 1000)
 
   for (const { task, agent, score, via } of plan.decisions) {
-    const allowed = stillAllowed(db, task.id, { wip: false })
+    const allowed = stillAllowed(db, task.id, { wip: false, assignedTo: via === 'owner' ? agent.name : undefined })
     if (!allowed.ok) {
       if (allowed.stop) break
       continue
@@ -1440,11 +1462,14 @@ export interface DispatchPlan {
     problem: string | null
     outcomes: Array<{ task_id: number; owner: string; outcome: string }>
     children: Array<{ task_id: number; outcome_task_id: number }>
+    capped_children: number[]
   }
   held_reason: DispatchScopeContext['held_reason']
   /** The activity line a held tick writes, and whether the next tick would write it (rate limit). */
   held_activity: { type: string; description: string; due: boolean } | null
-  wip: { in_progress: number; max: number | null; free: number | null }
+  wip: DispatchWip
+  /** The 24 h agent-invocation ceiling dispatch also obeys. */
+  budget: { used: number; cap: number; exceeded: boolean }
   route: Array<{ id: number; title: string; priority: string; to: string; via: RouteDecision['via'] }>
   dispatch: Array<{ id: number; title: string; priority: string; assigned_to: string; via: string }>
   not_selected: DispatchSkip[]
@@ -1482,6 +1507,7 @@ export function planDispatch(db: ReturnType<typeof getDatabase> = getDatabase())
 
   const runs = ctx.enabled && !ctx.held_reason
   const list = ctx.approved.list
+  const budget = readAgentInvocationBudget(db)
   return {
     generated_at: ctx.now,
     dispatch_enabled: ctx.enabled,
@@ -1496,15 +1522,17 @@ export function planDispatch(db: ReturnType<typeof getDatabase> = getDatabase())
       problem: ctx.approved.problem,
       outcomes: list?.outcomes ?? [],
       children: [...ctx.children].map(([task_id, outcome_task_id]) => ({ task_id, outcome_task_id })),
+      capped_children: ctx.capped_children,
     },
     held_reason: ctx.held_reason,
     held_activity: ctx.held_reason
       ? { type: DISPATCH_HELD_ACTIVITY, description: describeHeld(ctx), due: ctx.enabled && isHeldActivityDue(db, ctx.held_reason, ctx.now) }
       : null,
     wip: dispatch.wip,
+    budget,
     route: routing.decisions.map(d => ({ id: d.task.id, title: d.task.title, priority: d.task.priority, to: d.agent.name, via: d.via })),
     dispatch: dispatch.tasks.map(t => ({ id: t.id, title: t.title, priority: t.priority, assigned_to: t.assigned_to, via: t.via ?? 'assigned' })),
     not_selected: notSelected,
-    next_tick: { runs, would_route: runs ? routing.decisions.length : 0, would_dispatch: runs ? dispatch.tasks.length : 0 },
+    next_tick: { runs, would_route: runs ? routing.decisions.length : 0, would_dispatch: runs && !budget.exceeded ? dispatch.tasks.length : 0 },
   }
 }

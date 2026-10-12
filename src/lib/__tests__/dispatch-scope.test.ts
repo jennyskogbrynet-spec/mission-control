@@ -163,7 +163,7 @@ describe('A4: plan selects only what the morning meeting approved', () => {
       { id: 10, title: 'Research competitor pricing', priority: 'low', to: 'reidar', via: 'owner' },
     ])
     expect(plan.dispatch.map(d => d.id)).toEqual([11, 12, 13])
-    expect(plan.wip).toEqual({ in_progress: 0, max: 3, free: 3 })
+    expect(plan.wip).toEqual({ in_progress: 0, in_progress_total: 0, max: 3, free: 3 })
     expect(plan.not_selected).toContainEqual({ id: 10, reason: 'batch_limit' })
 
     const touched = new Set([...plan.route.map(r => r.id), ...plan.dispatch.map(d => d.id)])
@@ -187,16 +187,53 @@ describe('A4: plan selects only what the morning meeting approved', () => {
     expect(plan.not_selected).toContainEqual(expect.objectContaining({ id: 11, reason: 'owner_mismatch' }))
   })
 
-  it('WIP: at most 3 in_progress in total', () => {
+  it('WIP: at most 3 of the approved tasks in_progress; other lanes cannot hold the cap', () => {
     seedA4Board()
-    addTask(mock.db, { id: 40, status: 'in_progress', assigned_to: 'someone' })
-    addTask(mock.db, { id: 41, status: 'in_progress', assigned_to: 'someone' })
+    // Three unapproved rows in progress (another lane, or zombies): they do not count.
+    for (const id of [40, 41, 42]) addTask(mock.db, { id, status: 'in_progress', assigned_to: 'someone' })
+    expect(planDispatch(mock.db).dispatch.map(d => d.id)).toEqual([11, 12, 13])
+    // Two approved children already running leave one slot.
+    addTask(mock.db, { id: 43, status: 'in_progress', assigned_to: 'reidar', metadata: { outcome_task_id: 10 } })
+    addTask(mock.db, { id: 44, status: 'in_progress', assigned_to: 'reidar', metadata: { outcome_task_id: 10 } })
     expect(planDispatch(mock.db).dispatch.map(d => d.id)).toEqual([11])
-    addTask(mock.db, { id: 42, status: 'in_progress', assigned_to: 'someone' })
+    addTask(mock.db, { id: 45, status: 'in_progress', assigned_to: 'reidar', metadata: { outcome_task_id: 10 } })
     const full = planDispatch(mock.db)
     expect(full.dispatch).toEqual([])
-    expect(full.wip).toEqual({ in_progress: 3, max: 3, free: 0 })
+    expect(full.wip).toEqual({ in_progress: 3, in_progress_total: 6, max: 3, free: 0 })
     expect(full.not_selected).toContainEqual({ id: 11, reason: 'wip_cap' })
+  })
+
+  it('at most 5 children per approved outcome, lowest ids first', () => {
+    seedA4Board()
+    for (const id of [60, 61, 62, 63, 64]) addTask(mock.db, { id, status: 'backlog', metadata: { outcome_task_id: 10 } })
+    const ctx = resolveDispatchScope(mock.db, NOW)
+    expect([...ctx.children.keys()].filter(id => ctx.children.get(id) === 10).sort((a, b) => a - b)).toEqual([12, 60, 61, 62, 63])
+    expect(ctx.capped_children).toEqual([64])
+    expect(ctx.eligible_ids!.has(64)).toBe(false)
+  })
+
+  it('unroutable children cannot starve a listed task out of the per-tick route limit', () => {
+    seedA4Board()
+    // Outcome 10 (workspace 1) has five critical children nobody can take: every agent in
+    // workspace 1 is offline. Outcome 80 lives in workspace 2 with an available owner.
+    mock.db.prepare("UPDATE agents SET status = 'offline' WHERE workspace_id = 1").run()
+    for (const id of [70, 71, 72, 73, 74]) addTask(mock.db, { id, status: 'inbox', priority: 'critical', metadata: { outcome_task_id: 10 } })
+    addAgent(mock.db, 'w2-owner', 'coder', 'idle', 2)
+    addTask(mock.db, { id: 80, title: 'Implement in workspace 2', status: 'inbox', priority: 'low', workspace_id: 2, claimed_by: 'w2-owner' })
+    approve(mock.db, [{ task_id: 10, owner: 'reidar' }, { task_id: 80, owner: 'w2-owner' }], NOW - 60)
+    const plan = planDispatch(mock.db)
+    expect(plan.route).toEqual([expect.objectContaining({ id: 80, to: 'w2-owner', via: 'owner' })])
+    expect(plan.not_selected).toContainEqual(expect.objectContaining({ id: 70, reason: 'no_suitable_agent' }))
+  })
+
+  it('the plan shows the invocation budget and a spent budget dispatches nothing', () => {
+    seedA4Board()
+    setSetting(mock.db, 'general.task_dispatch', 'true')
+    setSetting(mock.db, 'general.agent_invocation_daily_cap', '2')
+    mock.db.prepare('INSERT INTO agent_invocations (ts, source, task_id) VALUES (?, ?, 1), (?, ?, 2)').run(NOW - 60, 'task_dispatch', NOW - 60, 'task_dispatch')
+    const plan = planDispatch(mock.db)
+    expect(plan.budget).toEqual({ used: 2, cap: 2, exceeded: true })
+    expect(plan.next_tick.would_dispatch).toBe(0)
   })
 
   it('missing, stale or invalid list: empty plan, and the held line it would write', () => {
@@ -333,17 +370,52 @@ describe('the real tick under approved_only', () => {
   it('WIP is re-checked before every claim, not only at selection', async () => {
     seedA4Board()
     setSetting(mock.db, 'general.task_dispatch', 'true')
-    addTask(mock.db, { id: 40, status: 'in_progress', assigned_to: 'someone' })
-    // Selection allows 2 (3 minus task 40). While 11 runs, other lanes start two more.
+    addTask(mock.db, { id: 40, status: 'in_progress', assigned_to: 'reidar', metadata: { outcome_task_id: 10 } })
+    // Selection allows 2 (3 minus approved child 40). While 11 runs, two more approved children start.
     mock.runOpenClaw.mockImplementationOnce(async () => {
-      addTask(mock.db, { id: 41, status: 'in_progress', assigned_to: 'someone' })
-      addTask(mock.db, { id: 42, status: 'in_progress', assigned_to: 'someone' })
+      addTask(mock.db, { id: 41, status: 'in_progress', assigned_to: 'stella', metadata: { outcome_task_id: 11 } })
+      addTask(mock.db, { id: 42, status: 'in_progress', assigned_to: 'stella', metadata: { outcome_task_id: 11 } })
       return OK_RESPONSE
     })
     const result = await dispatchAssignedTasks()
     expect(invokedTaskIds()).toEqual([11])
     expect(statusOf(13).status).toBe('assigned')
     expect(result.message).toMatch(/WIP cap 3/)
+  })
+
+  it('a listed owner changed mid-batch: the old assignee is not dispatched', async () => {
+    seedA4Board()
+    setSetting(mock.db, 'general.task_dispatch', 'true')
+    mock.runOpenClaw.mockImplementationOnce(async () => {
+      // Someone rewrites the list directly (PUT /api/settings): 13's parent 11 now belongs to vera.
+      approve(mock.db, [{ task_id: 10, owner: 'reidar' }, { task_id: 11, owner: 'vera' }, { task_id: 13, owner: 'stella' }], NOW)
+      return OK_RESPONSE
+    })
+    await dispatchAssignedTasks()
+    // 11 ran first; 13 (assigned to vera) is now listed for stella and must not run.
+    expect(invokedTaskIds()).toEqual([11])
+    expect(statusOf(13).status).toBe('assigned')
+  })
+
+  it('held list: stale requeue touches nothing, approved or not', async () => {
+    seedA4Board()
+    addTask(mock.db, { id: 50, status: 'in_progress', assigned_to: 'ghost', updated_at: 1, metadata: { outcome_task_id: 10 } })
+    approve(mock.db, [{ task_id: 10, owner: 'reidar' }], NOW - 40 * 3600)
+    const result = await requeueStaleTasks()
+    expect(result.message).toMatch(/held/)
+    expect(statusOf(50).status).toBe('in_progress')
+  })
+
+  it('held line rate limit is per reason: A, B, A within the hour writes A once', async () => {
+    seedA4Board()
+    setSetting(mock.db, 'general.task_dispatch', 'true')
+    mock.db.prepare("DELETE FROM settings WHERE key = 'general.task_dispatch_approved'").run()
+    await autoRouteInboxTasks() // missing
+    approve(mock.db, [{ task_id: 10, owner: 'reidar' }], NOW - 40 * 3600)
+    await autoRouteInboxTasks() // stale
+    mock.db.prepare("DELETE FROM settings WHERE key = 'general.task_dispatch_approved'").run()
+    await autoRouteInboxTasks() // missing again, same hour
+    expect(heldLines()).toBe(2)
   })
 
   it('stale requeue touches only approved tasks under approved_only', async () => {

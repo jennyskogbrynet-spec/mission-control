@@ -12,7 +12,9 @@
  *   id (MC has no parent column; one level only).
  * - missing, unparseable or older than 36 h: nothing qualifies. The scheduler moves
  *   nothing and writes one activity line (rate-limited), never falling back to `all`.
- * - at most 3 tasks `in_progress` in total.
+ * - at most 3 of those eligible tasks `in_progress` at once (the factory's own work in
+ *   flight; other lanes' `in_progress` rows do not count, so they cannot hold the cap).
+ * - at most 5 children per approved outcome, lowest ids first.
  *
  * `general.task_dispatch_scope` absent or anything but the exact string `all` means
  * `approved_only`. `general.task_dispatch` (the kill switch) absent means OFF.
@@ -30,6 +32,8 @@ export const APPROVED_MAX_AGE_HOURS = 36
 export const APPROVED_FUTURE_SKEW_SEC = 300
 export const APPROVED_MAX_OUTCOMES = 3
 export const APPROVED_ONLY_WIP_MAX = 3
+/** Children per approved outcome (lowest ids first). Any agent can write `outcome_task_id`, so it is bounded. */
+export const OUTCOME_CHILDREN_MAX = 5
 
 export const DISPATCH_HELD_ACTIVITY = 'task_dispatch_held'
 /** The same held reason is logged at most once per hour while it persists. */
@@ -72,6 +76,8 @@ export interface DispatchScopeContext {
   listed_owners: Map<number, string>
   /** Child task id -> the listed id it names in `metadata.outcome_task_id`. */
   children: Map<number, number>
+  /** Children beyond OUTCOME_CHILDREN_MAX for their outcome: never eligible. */
+  capped_children: number[]
   /** Ids dispatch may touch. `null` means every task (scope `all`). Empty when held. */
   eligible_ids: Set<number> | null
 }
@@ -161,17 +167,20 @@ export function readApprovedList(db: Db, now: number): ApprovedReading {
 
 /**
  * Tasks whose metadata names a listed id as `outcome_task_id`, in the same workspace as
- * that listed task. The LIKE is only a prefilter; the value is parsed strictly.
+ * that listed task, at most OUTCOME_CHILDREN_MAX per outcome (lowest ids). The LIKE is
+ * only a prefilter; the value is parsed strictly.
  */
-export function findOutcomeChildren(db: Db, listedIds: number[]): Map<number, number> {
+export function findOutcomeChildren(db: Db, listedIds: number[]): { children: Map<number, number>; capped: number[] } {
   const children = new Map<number, number>()
-  if (listedIds.length === 0) return children
+  const capped: number[] = []
+  if (listedIds.length === 0) return { children, capped }
   const listed = new Set(listedIds)
+  const perParent = new Map<number, number>()
   const parentWorkspace = new Map<number, number>()
   const parents = db.prepare('SELECT id, workspace_id FROM tasks WHERE id IN (SELECT value FROM json_each(?))')
     .all(JSON.stringify(listedIds)) as Array<{ id: number; workspace_id: number }>
   for (const p of parents) parentWorkspace.set(p.id, p.workspace_id)
-  const rows = db.prepare("SELECT id, workspace_id, metadata FROM tasks WHERE metadata LIKE '%outcome_task_id%'")
+  const rows = db.prepare("SELECT id, workspace_id, metadata FROM tasks WHERE metadata LIKE '%outcome_task_id%' ORDER BY id ASC")
     .all() as Array<{ id: number; workspace_id: number; metadata: string | null }>
   for (const row of rows) {
     if (listed.has(row.id) || !row.metadata) continue
@@ -181,9 +190,11 @@ export function findOutcomeChildren(db: Db, listedIds: number[]): Map<number, nu
     const parent = parseTaskIdStrict((meta as Record<string, unknown>).outcome_task_id)
     if (parent === null || !listed.has(parent)) continue
     if (parentWorkspace.get(parent) !== row.workspace_id) continue
-    children.set(row.id, parent)
+    perParent.set(parent, (perParent.get(parent) ?? 0) + 1)
+    if (perParent.get(parent)! > OUTCOME_CHILDREN_MAX) capped.push(row.id)
+    else children.set(row.id, parent)
   }
-  return children
+  return { children, capped }
 }
 
 export function resolveDispatchScope(db: Db, now = Math.floor(Date.now() / 1000)): DispatchScopeContext {
@@ -193,24 +204,28 @@ export function resolveDispatchScope(db: Db, now = Math.floor(Date.now() / 1000)
   const base = { now, enabled, scope, scope_setting: setting, approved }
 
   if (scope === 'all') {
-    return { ...base, held_reason: null, listed_owners: new Map(), children: new Map(), eligible_ids: null }
+    return { ...base, held_reason: null, listed_owners: new Map(), children: new Map(), capped_children: [], eligible_ids: null }
   }
 
   if (approved.state !== 'fresh' || !approved.list) {
     const held_reason: DispatchHeldReason = approved.state === 'stale' ? 'approved_list_stale'
       : approved.state === 'invalid' ? 'approved_list_invalid'
       : 'approved_list_missing'
-    return { ...base, held_reason, listed_owners: new Map(), children: new Map(), eligible_ids: new Set() }
+    return { ...base, held_reason, listed_owners: new Map(), children: new Map(), capped_children: [], eligible_ids: new Set() }
   }
 
   const listed_owners = new Map(approved.list.outcomes.map(o => [o.task_id, o.owner] as const))
-  const children = findOutcomeChildren(db, [...listed_owners.keys()])
+  const { children, capped } = findOutcomeChildren(db, [...listed_owners.keys()])
   const eligible_ids = new Set<number>([...listed_owners.keys(), ...children.keys()])
-  return { ...base, held_reason: null, listed_owners, children, eligible_ids }
+  return { ...base, held_reason: null, listed_owners, children, capped_children: capped, eligible_ids }
 }
 
-export function countInProgress(db: Db): number {
-  return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress'").get() as { c: number }).c
+/** `in_progress` rows, optionally only among `ids` (the eligible set). */
+export function countInProgress(db: Db, ids?: Set<number> | null): number {
+  if (!ids) return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress'").get() as { c: number }).c
+  if (ids.size === 0) return 0
+  return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress' AND id IN (SELECT value FROM json_each(?))")
+    .get(JSON.stringify([...ids])) as { c: number }).c
 }
 
 export function describeHeld(ctx: DispatchScopeContext): string {
@@ -225,17 +240,18 @@ export function describeHeld(ctx: DispatchScopeContext): string {
 }
 
 /**
- * Whether a held line is due: not when the newest held line has the same reason and is
- * younger than the interval. Read-only; the caller writes the line.
+ * Whether a held line is due: not when a line with the same reason was written within the
+ * interval (reasons flipping A, B, A still write A once an hour). Read-only; the caller
+ * writes the line.
  */
 export function isHeldActivityDue(db: Db, reason: DispatchHeldReason, now: number): boolean {
   try {
-    const last = db.prepare('SELECT created_at, data FROM activities WHERE type = ? ORDER BY id DESC LIMIT 1')
-      .get(DISPATCH_HELD_ACTIVITY) as { created_at: number; data: string | null } | undefined
-    if (!last) return true
-    let lastReason: unknown = null
-    try { lastReason = last.data ? (JSON.parse(last.data) as Record<string, unknown>).reason : null } catch { /* treat as different */ }
-    return !(lastReason === reason && now - Number(last.created_at) < DISPATCH_HELD_LOG_INTERVAL_SEC)
+    const recent = db.prepare(`
+      SELECT 1 FROM activities
+      WHERE type = ? AND created_at > ?
+        AND CASE WHEN json_valid(data) THEN json_extract(data, '$.reason') = ? ELSE 0 END
+      LIMIT 1`).get(DISPATCH_HELD_ACTIVITY, now - DISPATCH_HELD_LOG_INTERVAL_SEC, reason)
+    return !recent
   } catch {
     return true
   }

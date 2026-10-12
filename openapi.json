@@ -7658,7 +7658,8 @@
                         "continue_current",
                         "assigned",
                         "at_capacity",
-                        "no_tasks_available"
+                        "no_tasks_available",
+                        "dispatch_held"
                       ]
                     },
                     "agent": {
@@ -12839,7 +12840,7 @@
         ],
         "summary": "Load the morning meeting's approved-outcomes.json into the dispatch brake",
         "operationId": "setTaskDispatchApproved",
-        "description": "Requires admin access. Dry run unless apply is exactly true. outcomes is the approved-outcomes.json list that ines-commute morning reads: 1-3 objects with task_id, owner (the task's single observed owner), approved: true, outcome, non-empty sources and acceptance. Validated against the live board; on apply replaces general.task_dispatch_approved with a server-stamped approved_at. Never changes general.task_dispatch.",
+        "description": "Requires admin access. Dry run unless apply is exactly true. outcomes is the approved-outcomes.json list that ines-commute morning reads: 1-3 objects with task_id, owner (the task's single observed owner), approved: true, outcome, non-empty sources and acceptance. Validated against the live board; on apply replaces general.task_dispatch_approved with a server-stamped approved_at. Never changes general.task_dispatch. date, when given, must be today or yesterday (Europe/Oslo). Re-sending the outcomes already stored keeps their approved_at (unchanged: true); reapprove: true restarts the 36 h window.",
         "requestBody": {
           "required": true,
           "content": {
@@ -12867,6 +12868,10 @@
                     "type": "string"
                   },
                   "apply": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "reapprove": {
                     "type": "boolean",
                     "default": false
                   }

@@ -15,7 +15,7 @@ vi.mock('@/lib/db', () => ({
   },
 }))
 vi.mock('@/lib/auth', () => ({ requireRole: mocks.role }))
-vi.mock('@/lib/rate-limit', () => ({ mutationLimiter: () => null }))
+vi.mock('@/lib/rate-limit', () => ({ mutationLimiter: () => null, agentTaskLimiter: () => null }))
 vi.mock('@/lib/logger', () => ({ logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() } }))
 vi.mock('@/lib/event-bus', () => ({ eventBus: { broadcast: vi.fn() } }))
 vi.mock('@/lib/config', () => ({ config: { openclawHome: '/test/openclaw' } }))
@@ -24,6 +24,7 @@ vi.mock('@/lib/github-sync-engine', () => ({ syncTaskOutbound: vi.fn().mockResol
 
 import { GET as planGet } from '@/app/api/tasks/dispatch-plan/route'
 import { GET as approvedGet, POST as approvedPost } from '@/app/api/tasks/dispatch-approved/route'
+import { GET as queueGet } from '@/app/api/tasks/queue/route'
 import { runApprove, runDispatch } from '../../../scripts/mc-factory-hygiene.mjs'
 
 const NOW = 1_791_900_000
@@ -125,6 +126,81 @@ describe('POST /api/tasks/dispatch-approved', () => {
     vi.setSystemTime((NOW + 37 * 3600) * 1000)
     const body = await (await approvedGet(req('/api/tasks/dispatch-approved'))).json()
     expect(body).toMatchObject({ setting: 'general.task_dispatch_approved', state: 'stale', age_hours: 37 })
+  })
+})
+
+describe('re-applying an approval does not restart the 36 h clock', () => {
+  it('same outcomes again: unchanged, approved_at kept; reapprove: a new clock', async () => {
+    await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true }))
+    const first = JSON.parse(setting().value).approved_at
+    vi.setSystemTime((NOW + 30 * 3600) * 1000)
+    const again = await (await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true }))).json()
+    expect(again).toMatchObject({ applied: false, unchanged: true })
+    expect(JSON.parse(setting().value).approved_at).toBe(first)
+    vi.setSystemTime((NOW + 37 * 3600) * 1000)
+    expect((await (await approvedGet(req('/api/tasks/dispatch-approved'))).json()).state).toBe('stale')
+    const re = await (await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true, reapprove: true }))).json()
+    expect(re.applied).toBe(true)
+    expect(JSON.parse(setting().value).approved_at).toBe(NOW + 37 * 3600)
+    const line = mocks.db.prepare("SELECT description FROM activities WHERE type = 'task_dispatch_approved' ORDER BY id DESC LIMIT 1").get()
+    expect(line.description).toMatch(/re-approved/)
+  })
+
+  it('a different set of outcomes is a new approval with a new clock', async () => {
+    await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true }))
+    vi.setSystemTime((NOW + 3600) * 1000)
+    const res = await (await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile().slice(0, 1), apply: true }))).json()
+    expect(res.applied).toBe(true)
+    expect(JSON.parse(setting().value).approved_at).toBe(NOW + 3600)
+  })
+
+  it('a date that is not today or yesterday in Oslo is refused', async () => {
+    const res = await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true, date: '2026-10-01' }))
+    expect(res.status).toBe(422)
+    expect((await res.json()).errors.join(' ')).toMatch(/not today or yesterday/)
+    expect(setting()).toBeUndefined()
+  })
+})
+
+describe('GET /api/tasks/queue (pull dispatch) obeys the brake', () => {
+  const poll = async (agent: string) => (await queueGet(req(`/api/tasks/queue?agent=${agent}`))).json()
+  beforeEach(() => {
+    addTask(mocks.db, { id: 20, title: 'Unapproved critical', status: 'inbox', priority: 'critical' })
+    addTask(mocks.db, { id: 21, title: 'Approved child', status: 'inbox', priority: 'high', metadata: { outcome_task_id: 11 } })
+  })
+
+  it('switch off: no new claim, even with a fresh list', async () => {
+    await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true }))
+    const body = await poll('reidar')
+    expect(body).toMatchObject({ task: null, reason: 'dispatch_held' })
+    expect(mocks.db.prepare('SELECT status FROM tasks WHERE id = 20').get()).toEqual({ status: 'inbox' })
+  })
+
+  it('switch on, list missing: no new claim', async () => {
+    setSetting(mocks.db, 'general.task_dispatch', 'true')
+    expect(await poll('reidar')).toMatchObject({ task: null, reason: 'dispatch_held', held: 'approved_list_missing' })
+  })
+
+  it('switch on, fresh list: only approved work, a listed task only for its owner', async () => {
+    setSetting(mocks.db, 'general.task_dispatch', 'true')
+    await approvedPost(req('/api/tasks/dispatch-approved', 'POST', { outcomes: outcomesFile(), apply: true }))
+    // vera owns nothing listed: she may take the approved child, never the unapproved critical or 10/11.
+    expect((await poll('vera')).task).toMatchObject({ id: 21, status: 'in_progress', assigned_to: 'vera' })
+    expect((await poll('someone-else')).task).toBeNull()
+    // reidar gets his listed task 10.
+    expect((await poll('reidar')).task).toMatchObject({ id: 10, assigned_to: 'reidar' })
+    expect(mocks.db.prepare('SELECT status FROM tasks WHERE id = 20').get()).toEqual({ status: 'inbox' })
+  })
+
+  it('a running task is still handed back (continue_current) while held', async () => {
+    addTask(mocks.db, { id: 30, status: 'in_progress', assigned_to: 'reidar' })
+    expect(await poll('reidar')).toMatchObject({ reason: 'continue_current', task: expect.objectContaining({ id: 30 }) })
+  })
+
+  it('scope all + switch on: the legacy queue (unapproved critical first)', async () => {
+    setSetting(mocks.db, 'general.task_dispatch', 'true')
+    setSetting(mocks.db, 'general.task_dispatch_scope', 'all')
+    expect((await poll('vera')).task).toMatchObject({ id: 20 })
   })
 })
 

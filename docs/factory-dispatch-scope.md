@@ -2,7 +2,8 @@
 
 Mission Control's own dispatch is the scheduler job `task_dispatch` (`src/lib/scheduler.ts`):
 `autoRouteInboxTasks()` (inbox → assigned) then `dispatchAssignedTasks()` (assigned →
-in_progress, i.e. an agent invocation). Since F2 it is braked three ways.
+in_progress, i.e. an agent invocation). Agents can also pull work with
+`GET /api/tasks/queue` (MCP `mc_poll_task_queue`). Since F2 both are braked three ways.
 
 | Setting | Values | Absent means |
 |---|---|---|
@@ -13,10 +14,15 @@ in_progress, i.e. an agent invocation). Since F2 it is braked three ways.
 Under `approved_only`:
 
 - Only tasks in the current approved list, or with `metadata.outcome_task_id` equal to a
-  listed id (same workspace, one level), are routed, dispatched or stale-requeued.
+  listed id (same workspace, one level, at most **5** per outcome, lowest ids first), are
+  routed, dispatched, handed out by the queue or stale-requeued.
 - A listed task is routed only to its approved `owner`, and dispatched only while
   `assigned_to` equals that owner. Children are routed by the usual scoring.
-- At most **3** tasks `in_progress` in total (all lanes count), re-checked before every claim.
+- At most **3** of those eligible tasks `in_progress` at once, re-checked before every
+  claim. Other lanes' `in_progress` rows do not count, so they cannot hold the cap shut
+  (the plan shows both numbers).
+- The queue still returns an agent's own running task (`continue_current`); a new claim
+  answers `reason: dispatch_held` while the switch is off or the list is held.
 - A list older than **36 h** (server-stamped `approved_at`), missing or unparseable holds
   everything. Each held tick writes an activity line `task_dispatch_held`, at most one per
   hour per reason. It never falls back to `all`.
@@ -41,8 +47,11 @@ executed by their native lane, not by this scheduler.
    ```
 
    The server validates against the live board (1–3 outcomes, `approved: true`, owner = the
-   task's single observed owner, non-empty `sources` and `acceptance`), stamps `approved_at`
-   and returns the resulting plan. It never touches `general.task_dispatch`.
+   task's single observed owner, non-empty `sources` and `acceptance`, `--date` today or
+   yesterday), stamps `approved_at` and returns the resulting plan. It never touches
+   `general.task_dispatch`. Re-sending the outcomes already stored does not restart the
+   36 h clock (`UNCHANGED`); approving the same outcomes again on a new day needs
+   `--reapprove`.
 4. Check what the next tick would take, without moving anything:
 
    ```bash
@@ -70,5 +79,7 @@ executed by their native lane, not by this scheduler.
 
 - `GET /api/tasks/dispatch-plan` (viewer): read-only preview of the next tick.
 - `GET /api/tasks/dispatch-approved` (viewer): the stored list, `fresh|missing|stale|invalid`.
-- `POST /api/tasks/dispatch-approved` (admin): `{outcomes, date?, apply?}`; dry run unless
-  `apply === true`; 422 with `errors[]` when it does not validate.
+- `POST /api/tasks/dispatch-approved` (admin): `{outcomes, date?, apply?, reapprove?}`; dry
+  run unless `apply === true`; 422 with `errors[]` when it does not validate.
+- Trust boundary: an admin can still write `general.task_dispatch_approved` directly with
+  `PUT /api/settings`; the reader validates the shape and the 36 h clock, not the author.

@@ -13,6 +13,9 @@
  * - `approved` is literally `true`; `outcome`, `sources` and `acceptance` are non-empty.
  *
  * The server stamps `approved_at`; a caller cannot back- or forward-date an approval.
+ * Re-sending the outcomes already stored (same task ids and owners) does NOT restart the
+ * 36 h window: a job that replays yesterday's file keeps yesterday's clock. Approving the
+ * same outcomes again on a new day takes an explicit `reapprove`.
  * `sources` and `acceptance` stay in the meeting record; the setting keeps what dispatch
  * needs (id, owner, outcome text).
  */
@@ -102,6 +105,17 @@ export function validateApprovedOutcomes(
 /** Calendar date in Oslo (the meeting's day), YYYY-MM-DD. */
 export function osloDate(nowMs = Date.now()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Oslo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nowMs))
+}
+
+/** Today and yesterday in Oslo: the only dates an approval may carry. */
+export function allowedApprovalDates(nowMs = Date.now()): string[] {
+  return [osloDate(nowMs), osloDate(nowMs - 24 * 3600 * 1000)]
+}
+
+/** Same decision: the same task ids with the same owners (outcome wording may differ). */
+export function sameApprovedOutcomes(a: ApprovedOutcome[], b: ApprovedOutcome[]): boolean {
+  const key = (list: ApprovedOutcome[]) => list.map(o => `${o.task_id}:${o.owner}`).sort().join('|')
+  return key(a) === key(b)
 }
 
 export function buildApprovedList(outcomes: ApprovedOutcome[], opts: { now: number; date?: string; source?: string }): ApprovedList {

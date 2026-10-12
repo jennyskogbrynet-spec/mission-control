@@ -259,11 +259,15 @@ export async function runApprove(flags, { request, log = console.log, readFile =
     return { exit: 2 }
   }
   const apply = flags.apply === true
-  const body = { outcomes, apply, ...(typeof flags.date === 'string' ? { date: flags.date } : {}), source: 'morning-meeting' }
+  const body = { outcomes, apply, reapprove: flags.reapprove === true, ...(typeof flags.date === 'string' ? { date: flags.date } : {}), source: 'morning-meeting' }
   const result = await request('/api/tasks/dispatch-approved', 'POST', body)
   if (result.errors?.length) {
     for (const e of result.errors) line(log, `  INVALID ${e}`)
     return { exit: 1, result }
+  }
+  if (result.unchanged) {
+    line(log, `UNCHANGED: already approved on ${result.stored.value.date} (${result.stored.state}, ${result.stored.age_hours} h old). The clock is kept; add --reapprove to approve again for a new day.`)
+    return { exit: 0, result }
   }
   const list = result.written?.value ?? result.would_write?.value
   line(log, `${apply ? 'APPROVED' : 'WOULD APPROVE'} ${list.outcomes.length} outcome(s) for ${list.date}: ${list.outcomes.map((o) => `#${o.task_id} (${o.owner})`).join(', ')}`)
@@ -279,7 +283,7 @@ const USAGE = `usage: mc-factory-hygiene.mjs <closure|leases|intake|measure|disp
   intake   [--promote [--apply]]
   measure  [--project <slug>]        (read-only)
   dispatch --plan [--json]           (read-only: what the next dispatch tick would take)
-  approve  --outcomes <approved-outcomes.json> [--date YYYY-MM-DD] [--apply]`
+  approve  --outcomes <approved-outcomes.json> [--date YYYY-MM-DD] [--apply] [--reapprove]`
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {

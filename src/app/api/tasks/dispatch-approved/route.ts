@@ -4,8 +4,8 @@ import { requireRole } from '@/lib/auth'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 import { planDispatch } from '@/lib/task-dispatch'
-import { readApprovedList, DISPATCH_APPROVED_SETTING } from '@/lib/dispatch-scope'
-import { buildApprovedList, validateApprovedOutcomes, writeApprovedList } from '@/lib/dispatch-approval'
+import { parseApprovedList, readApprovedList, DISPATCH_APPROVED_SETTING } from '@/lib/dispatch-scope'
+import { allowedApprovalDates, buildApprovedList, sameApprovedOutcomes, validateApprovedOutcomes, writeApprovedList } from '@/lib/dispatch-approval'
 
 /**
  * GET /api/tasks/dispatch-approved
@@ -29,13 +29,15 @@ export async function GET(request: NextRequest) {
  * POST /api/tasks/dispatch-approved
  *
  * Body: { outcomes: <the morning meeting's approved-outcomes.json list>, date?: "YYYY-MM-DD",
- *         source?: string, apply?: boolean }
+ *         source?: string, apply?: boolean, reapprove?: boolean }
  *
  * DRY RUN unless `apply` is exactly `true`. Validates the list against the live board
  * (1-3 outcomes, approved: true, owner = the task's single observed owner, sources and
  * acceptance present) and, on apply, replaces the approved list with a server-stamped
  * `approved_at`. It never starts dispatch: `general.task_dispatch` is not touched.
- * 422 when the list does not validate (nothing is written).
+ * 422 when the list does not validate (nothing is written), or when `date` is not today
+ * or yesterday (Oslo). Re-sending the outcomes already stored keeps their `approved_at`
+ * (`unchanged: true`): the 36 h window restarts only with `reapprove: true`.
  */
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'admin')
@@ -52,8 +54,27 @@ export async function POST(request: NextRequest) {
     const apply = body.apply === true
 
     const validation = validateApprovedOutcomes(db, body.outcomes, { workspaceId })
+    if (typeof body.date === 'string' && !allowedApprovalDates().includes(body.date)) {
+      validation.ok = false
+      validation.errors.push(`date ${body.date} is not today or yesterday (Europe/Oslo)`)
+    }
     if (!validation.ok) {
       return NextResponse.json({ dry_run: !apply, applied: false, errors: validation.errors, notes: validation.notes }, { status: 422 })
+    }
+
+    const reapprove = body.reapprove === true
+    const storedRow = db.prepare('SELECT value FROM settings WHERE key = ?').get(DISPATCH_APPROVED_SETTING) as { value: string } | undefined
+    const stored = storedRow ? parseApprovedList(storedRow.value) : null
+    if (stored?.ok && !reapprove && sameApprovedOutcomes(stored.list.outcomes, validation.outcomes)) {
+      const reading = readApprovedList(db, Math.floor(Date.now() / 1000))
+      return NextResponse.json({
+        dry_run: !apply,
+        applied: false,
+        unchanged: true,
+        stored: { key: DISPATCH_APPROVED_SETTING, value: stored.list, state: reading.state, age_hours: reading.age_hours },
+        message: 'These outcomes are already the approved list; its approved_at is kept. Send reapprove: true to approve them again for a new day.',
+        notes: validation.notes,
+      })
     }
 
     const now = Math.floor(Date.now() / 1000)
@@ -78,8 +99,8 @@ export async function POST(request: NextRequest) {
       ip_address: request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown',
     })
     db_helpers.logActivity('task_dispatch_approved', 'system', 0, actor,
-      `Morning meeting approved ${list.outcomes.length} outcome(s) for dispatch: ${list.outcomes.map(o => o.task_id).join(', ')}`,
-      { date: list.date, approved_at: list.approved_at, task_ids: list.outcomes.map(o => o.task_id), owners: list.outcomes.map(o => o.owner) },
+      `Morning meeting ${reapprove ? 're-approved' : 'approved'} ${list.outcomes.length} outcome(s) for dispatch: ${list.outcomes.map(o => o.task_id).join(', ')}`,
+      { date: list.date, approved_at: list.approved_at, task_ids: list.outcomes.map(o => o.task_id), owners: list.outcomes.map(o => o.owner), reapprove },
       workspaceId)
 
     return NextResponse.json({ dry_run: false, applied: true, written: { key: DISPATCH_APPROVED_SETTING, value: list }, notes: validation.notes, plan: planDispatch(db) })
