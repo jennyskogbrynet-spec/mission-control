@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const runCommandMock = vi.fn()
+const runOpenClawMock = vi.fn()
+const runClawdbotMock = vi.fn()
+const getDatabaseMock = vi.fn()
 const loggerErrorMock = vi.fn()
 
 vi.mock('@/lib/auth', () => ({
@@ -10,8 +13,8 @@ vi.mock('@/lib/auth', () => ({
 
 vi.mock('@/lib/command', () => ({
   runCommand: runCommandMock,
-  runOpenClaw: vi.fn(),
-  runClawdbot: vi.fn(),
+  runOpenClaw: runOpenClawMock,
+  runClawdbot: runClawdbotMock,
 }))
 
 vi.mock('@/lib/config', () => ({
@@ -23,7 +26,7 @@ vi.mock('@/lib/config', () => ({
   },
 }))
 
-vi.mock('@/lib/db', () => ({ getDatabase: vi.fn() }))
+vi.mock('@/lib/db', () => ({ getDatabase: getDatabaseMock }))
 vi.mock('@/lib/sessions', () => ({ getAllGatewaySessions: vi.fn(() => []), getAgentLiveStatuses: vi.fn(() => []) }))
 vi.mock('@/lib/provider-subscriptions', () => ({
   detectProviderSubscriptions: vi.fn(() => ({})),
@@ -49,10 +52,18 @@ describe('status route Ollama model discovery', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
+    vi.spyOn(process, 'memoryUsage').mockReturnValue({
+      rss: 100 * 1024 * 1024,
+      heapTotal: 50 * 1024 * 1024,
+      heapUsed: 25 * 1024 * 1024,
+      external: 0,
+      arrayBuffers: 0,
+    })
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('uses Ollama HTTP API instead of spawning ollama CLI', async () => {
@@ -93,5 +104,47 @@ describe('status route Ollama model discovery', () => {
     expect(response.status).toBe(200)
     expect(payload.models.some((m) => m.name === 'openai/gpt-4.1-mini')).toBe(true)
     expect(loggerErrorMock).toHaveBeenCalled()
+  })
+
+  it('keeps the public health probe in-process', async () => {
+    const dbGet = vi.fn(() => ({ ok: 1 }))
+    getDatabaseMock.mockReturnValue({
+      prepare: vi.fn(() => ({ get: dbGet })),
+    })
+
+    const { GET } = await import('@/app/api/status/route')
+    const response = await GET(new NextRequest('http://localhost/api/status?action=health'))
+    const payload = await response.json() as { status: string; checks: Array<{ name: string }> }
+
+    expect(response.status).toBe(200)
+    expect(payload.status).toBe('healthy')
+    expect(payload.checks.map((check) => check.name)).toEqual(['Database', 'Process Memory'])
+    expect(dbGet).toHaveBeenCalledOnce()
+    expect(runCommandMock).not.toHaveBeenCalled()
+    expect(runOpenClawMock).not.toHaveBeenCalled()
+    expect(runClawdbotMock).not.toHaveBeenCalled()
+  })
+
+  it('reports unhealthy when the liveness database check fails', async () => {
+    getDatabaseMock.mockImplementation(() => {
+      throw new Error('database unavailable')
+    })
+
+    const { GET } = await import('@/app/api/status/route')
+    const response = await GET(new NextRequest('http://localhost/api/status?action=health'))
+    const payload = await response.json() as {
+      status: string
+      checks: Array<{ name: string; status: string }>
+    }
+
+    expect(response.status).toBe(200)
+    expect(payload.status).toBe('unhealthy')
+    expect(payload.checks).toContainEqual(expect.objectContaining({
+      name: 'Database',
+      status: 'unhealthy',
+    }))
+    expect(runCommandMock).not.toHaveBeenCalled()
+    expect(runOpenClawMock).not.toHaveBeenCalled()
+    expect(runClawdbotMock).not.toHaveBeenCalled()
   })
 })

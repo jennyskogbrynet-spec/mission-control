@@ -528,73 +528,20 @@ async function performHealthCheck() {
     })
   }
 
-  // Check gateway connection
-  try {
-    const gatewayStatus = await getGatewayStatus()
-    health.checks.push({
-      name: 'Gateway',
-      status: gatewayStatus.running ? 'healthy' : 'unhealthy',
-      message: gatewayStatus.running ? 'Gateway is running' : 'Gateway is not running'
-    })
-  } catch (error) {
-    health.checks.push({
-      name: 'Gateway',
-      status: 'error',
-      message: 'Failed to check gateway status'
-    })
-  }
-
-  // Check disk space (cross-platform: use df -h / and parse capacity column)
-  try {
-    const { stdout } = await runCommand('df', ['-h', '/'], {
-      timeoutMs: 3000
-    })
-    const lines = stdout.trim().split('\n')
-    const last = lines[lines.length - 1] || ''
-    const parts = last.split(/\s+/)
-    // On macOS capacity is col 4 ("85%"), on Linux use% is col 4 as well
-    const pctField = parts.find(p => p.endsWith('%')) || '0%'
-    const usagePercent = parseInt(pctField.replace('%', '') || '0')
-
-    health.checks.push({
-      name: 'Disk Space',
-      status: usagePercent < 90 ? 'healthy' : usagePercent < 95 ? 'warning' : 'critical',
-      message: `Disk usage: ${usagePercent}%`
-    })
-  } catch (error) {
-    health.checks.push({
-      name: 'Disk Space',
-      status: 'error',
-      message: 'Failed to check disk space'
-    })
-  }
-
-  // Check memory usage (cross-platform)
-  try {
-    const usagePercent = (await getMemorySnapshot()).usagePercent
-
-    health.checks.push({
-      name: 'Memory Usage',
-      status: usagePercent < 90 ? 'healthy' : usagePercent < 95 ? 'warning' : 'critical',
-      message: `Memory usage: ${usagePercent}%`
-    })
-  } catch (error) {
-    health.checks.push({
-      name: 'Memory Usage',
-      status: 'error',
-      message: 'Failed to check memory usage'
-    })
-  }
+  // Keep the public liveness path in-process. Gateway, disk, and host-memory
+  // diagnostics belong to the authenticated overview/dashboard endpoints;
+  // shelling out here can exceed the watchdog timeout while the server is alive.
 
   // Determine overall health
   const hasError = health.checks.some((check: any) => check.status === 'error')
+  const hasUnhealthy = health.checks.some((check: any) => check.status === 'unhealthy')
   const hasCritical = health.checks.some((check: any) => check.status === 'critical')
   const hasWarning = health.checks.some((check: any) => check.status === 'warning')
   const hasDegraded = health.checks.some((check: any) =>
     check.name === 'Database' && check.status === 'warning'
   )
 
-  if (hasError || hasCritical) {
+  if (hasError || hasUnhealthy || hasCritical) {
     health.status = 'unhealthy'
   } else if (hasDegraded) {
     health.status = 'degraded'

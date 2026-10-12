@@ -145,10 +145,11 @@ class CodexTests(unittest.TestCase):
     def fake_factory(self, before=None, after=None, limits=None):
         account = {"type": "chatgpt", "email": EMAIL, "planType": "pro"}
         self.calls = []
+        self.factory_args = None
         outer = self
 
         class Fake:
-            def __init__(self, *args): pass
+            def __init__(self, *args): outer.factory_args = args
             def rpc(self, ident, method, params):
                 outer.calls.append(method)
                 return {1: {}, 2: {"account": before or account}, 3: limits or {
@@ -174,6 +175,46 @@ class CodexTests(unittest.TestCase):
     def test_codex_identity_race_rejects_all_successes(self):
         with self.assertRaisesRegex(m.CollectionError, "account_changed_during_collection"):
             m.collect_codex(profile("codex"), self.fake_factory(after={"type": "chatgpt", "email": "other@example.com", "planType": "pro"}))
+
+    def test_isolated_codex_home_applies_only_to_actual_app_server_child(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder, \
+                patch.dict(os.environ, {"HOME": "/real-home", "CODEX_HOME": "/default-pro"}, clear=True):
+            os.chmod(folder, 0o700)
+            p = profile("codex"); p["codexHome"] = folder
+            m.collect_codex(p, self.fake_factory())
+            command, env, _deadline = self.factory_args
+            self.assertEqual(command, ["codex", "app-server"])
+            self.assertEqual(env["HOME"], "/real-home")
+            self.assertEqual(env["CODEX_HOME"], folder)
+            self.assertEqual(os.environ["CODEX_HOME"], "/default-pro")
+
+    def test_default_codex_profile_preserves_existing_account_environment(self):
+        with patch.dict(os.environ, {"HOME": "/real-home", "CODEX_HOME": "/default-pro"}, clear=True):
+            m.collect_codex(profile("codex"), self.fake_factory())
+            env = self.factory_args[1]
+            self.assertEqual(env["HOME"], "/real-home")
+            self.assertEqual(env["CODEX_HOME"], "/default-pro")
+
+    def test_isolated_identity_mismatch_rejects_access_and_quota(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
+            os.chmod(folder, 0o700)
+            p = profile("codex"); p["codexHome"] = folder
+            result = m.collect_profiles({"profiles": [p]}, collectors={"codex": lambda selected:
+                m.collect_codex(selected, self.fake_factory(before={"type": "chatgpt", "email": "other@example.com", "planType": "plus"},
+                                                           after={"type": "chatgpt", "email": "other@example.com", "planType": "plus"}))})
+        self.assertEqual(result["attempts"][0]["error"], "unexpected_account_identity")
+        self.assertTrue(all(row["status"] == "failed" for row in result["observations"]))
+
+    def test_missing_window_keeps_other_codex_pool_observation(self):
+        p = profile("codex")
+        p["pools"] = [
+            {"poolId": "general", "windows": [{"key": "primary", "source": "primary"}]},
+            {"poolId": "spark", "limitId": "missing", "windows": [{"key": "primary", "source": "primary"}]},
+        ]
+        quotas = [row for row in m.collect_codex(p, self.fake_factory()) if row["kind"] == "quota"]
+        self.assertEqual([row["status"] for row in quotas], ["success", "failed"])
+        self.assertEqual(quotas[0]["windows"][0]["usedPercent"], 32)
+        self.assertEqual(quotas[1]["error"], "required_quota_window_missing")
 
 
 class ZaiTests(unittest.TestCase):
@@ -348,7 +389,8 @@ class PacingTests(unittest.TestCase):
         p = ZaiTests().p()
         registry = {"accounts": [{"id": p["accountId"], "provider": "zai", "pools": [
             {"id": p["pools"][0]["poolId"], "windowKeys": [w["key"] for w in p["pools"][0]["windows"]]}]}],
-            "bindings": [{"id": p["bindingId"], "accountId": p["accountId"], "profileRef": p["profileRef"]}]}
+            "bindings": [{"id": p["bindingId"], "accountId": p["accountId"],
+                          "profileRef": p["profileRef"], "runtimeId": "zai-claude-code"}]}
         def request(path, *args):
             calls.append(("mc", self.now))
             return {"created": True, "status": "success"} if args else registry
@@ -372,7 +414,8 @@ class PublicationTests(unittest.TestCase):
     def registry(self):
         return {"accounts": [{"id": "example-account", "provider": "claude", "identityFingerprint": HASH,
                 "pools": [{"id": "example-pool", "windowKeys": ["primary", "secondary"]}]}],
-                "bindings": [{"id": "example-cli", "accountId": "example-account", "profileRef": "example-default"}]}
+                "bindings": [{"id": "example-cli", "accountId": "example-account",
+                              "profileRef": "example-default", "runtimeId": "claude-code"}]}
 
     def test_registry_identity_mismatch_blocks_provider_and_invalidates_access(self):
         registry = self.registry(); registry["accounts"][0]["identityFingerprint"] = "0" * 64
@@ -524,10 +567,79 @@ class ProcessAndConfigTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(m.CollectionError):
                 m.validate_config(config)
 
-    def test_codex_home_override_is_unsupported(self):
+    def test_codex_rejects_claude_directory_field(self):
         p = profile("codex"); p["configDir"] = "/other"
         with self.assertRaisesRegex(m.CollectionError, "profile_directory_unsupported"):
             m.validate_config({"version": 1, "profiles": [p]})
+
+    def test_codex_home_rejects_wrong_provider_relative_symlink_owner_and_permissions(self):
+        p = profile(); p["codexHome"] = "/private/account"
+        with self.assertRaisesRegex(m.CollectionError, "profile_directory_unsupported"):
+            m.validate_config({"version": 1, "profiles": [p]})
+
+        p = profile("codex"); p["codexHome"] = "relative/account"
+        with self.assertRaisesRegex(m.CollectionError, "profile_directory_invalid"):
+            m.validate_config({"version": 1, "profiles": [p]})
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as parent:
+            private = Path(parent) / "private"; private.mkdir(mode=0o700)
+            link = Path(parent) / "linked"; link.symlink_to(private, target_is_directory=True)
+            for path, error in [(link, "profile_directory_symlink_unsupported")]:
+                p = profile("codex"); p["codexHome"] = str(path)
+                with self.subTest(error=error), self.assertRaisesRegex(m.CollectionError, error):
+                    m.oauth_environment("codex", p)
+            os.chmod(private, 0o750)
+            with self.assertRaisesRegex(m.CollectionError, "profile_directory_not_private"):
+                m.private_profile_directory(str(private))
+            os.chmod(private, 0o700)
+            with patch.object(m.os, "getuid", return_value=os.getuid() + 1), \
+                    self.assertRaisesRegex(m.CollectionError, "profile_directory_wrong_owner"):
+                m.private_profile_directory(str(private))
+
+    def test_missing_codex_home_is_login_required_without_credential_read(self):
+        p = profile("codex"); p["codexHome"] = str(Path.cwd() / "missing-codex-profile-fixture")
+        with self.assertRaises(m.CollectionError) as error:
+            m.oauth_environment("codex", p)
+        self.assertEqual(error.exception.code, "profile_directory_missing")
+        self.assertTrue(error.exception.login)
+
+    def test_exact_profile_lookup_rejects_missing_and_provider_mismatch(self):
+        config = {"profiles": [profile("codex")]}
+        self.assertIs(m.configured_profile(config, "example-default", "codex"), config["profiles"][0])
+        with self.assertRaisesRegex(m.CollectionError, "profile_provider_mismatch"):
+            m.configured_profile(config, "example-default", "claude")
+        with self.assertRaisesRegex(m.CollectionError, "profile_not_configured"):
+            m.configured_profile(config, "missing", "codex")
+
+    def test_release_executor_resolves_explicit_home_and_omits_default_home(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
+            os.chmod(folder, 0o700)
+            explicit = profile("codex"); explicit.update({"profileRef": "codex-plus",
+                "expectedPlanType": "plus", "codexHome": folder})
+            default = profile("codex"); default.update({"profileRef": "codex-default",
+                                                        "expectedPlanType": "pro"})
+            config_path = Path(folder) / "collectors.json"
+            config_path.write_text(json.dumps({"version": 1, "profiles": [explicit, default]}))
+            self.assertEqual(m.resolve_codex_executor("codex-plus", config_path=config_path),
+                             {"profileRef": "codex-plus", "provider": "codex", "codexHome": folder})
+            self.assertEqual(m.resolve_codex_executor("codex-default", config_path=config_path),
+                             {"profileRef": "codex-default", "provider": "codex"})
+
+    def test_release_executor_rejects_non_codex_profile(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
+            config_path = Path(folder) / "collectors.json"
+            config_path.write_text(json.dumps({"version": 1, "profiles": [profile("claude")]}))
+            with self.assertRaisesRegex(m.CollectionError, "profile_provider_mismatch"):
+                m.resolve_codex_executor("example-default", config_path=config_path)
+
+    def test_plan_profile_isolation_is_required_in_private_config(self):
+        plus = profile("codex"); plus["expectedPlanType"] = "plus"
+        with self.assertRaisesRegex(m.CollectionError, "profile_directory_required"):
+            m.validate_config({"version": 1, "profiles": [plus]})
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
+            pro = profile("codex"); pro.update({"expectedPlanType": "pro", "codexHome": folder})
+            with self.assertRaisesRegex(m.CollectionError, "profile_directory_unsupported"):
+                m.validate_config({"version": 1, "profiles": [pro]})
 
 
 if __name__ == "__main__":

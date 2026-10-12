@@ -2,8 +2,9 @@
 """Read subscription capacity; publish observations to local MC only with --publish.
 
 Private configuration (no credentials): version=1, profiles=[{provider, profileRef,
-accountId, bindingId? or bindingIds?, expectedEmailHash?, configDir? (Claude only), apiKeyEnv?
-(ZAI only), pools:[{poolId, limitId? (Codex), windows:[{key, source, label?}]}]}].
+accountId, bindingId? or bindingIds?, expectedEmailHash?, expectedPlanType? (Codex
+only), configDir? (Claude only), codexHome? (Codex only), apiKeyEnv? (ZAI only),
+pools:[{poolId, limitId? (Codex), windows:[{key, source, label?}]}]}].
 ZAI accepts only ZAI_API_KEY: the environment takes precedence over the literal
 assignment in ~/.openclaw/.env. That file is never sourced or evaluated.
 Direct runs space quota reads and MC requests by at least five seconds; publishing
@@ -26,6 +27,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,7 @@ import uuid
 MAX_BYTES = 2 * 1024 * 1024
 TIMEOUT = 60
 REGISTRY_PROVIDERS = {"claude": {"claude", "anthropic"}, "codex": {"codex", "openai"}, "zai": {"zai"}}
+REGISTRY_RUNTIMES = {"claude": {"claude-code"}, "codex": {"codex-cli"}, "zai": {"zai-claude-code"}}
 DEFAULT_CONFIG = Path.home() / ".openclaw/mission-control/compute-collectors.json"
 OPENCLAW_ENV = Path.home() / ".openclaw/.env"
 ZAI_KEY_ENV = "ZAI_API_KEY"
@@ -162,6 +165,75 @@ def verified_identity(before, after, expected):
     return first
 
 
+def private_profile_directory(value):
+    """Validate an isolated profile root without opening or enumerating its files."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise CollectionError("profile_directory_invalid")
+    folder = Path(value)
+    if not folder.is_absolute() or str(folder) != os.path.abspath(value):
+        raise CollectionError("profile_directory_invalid")
+    try:
+        # A symlink at any path component could silently select another account.
+        # resolve(strict=True) checks the complete chain without reading credentials.
+        if folder.resolve(strict=True) != folder:
+            raise CollectionError("profile_directory_symlink_unsupported")
+        details = os.lstat(folder)
+    except FileNotFoundError:
+        raise CollectionError("profile_directory_missing", login=True) from None
+    except CollectionError:
+        raise
+    except OSError:
+        raise CollectionError("profile_directory_invalid") from None
+    if not stat.S_ISDIR(details.st_mode):
+        raise CollectionError("profile_directory_invalid")
+    if details.st_uid != os.getuid():
+        raise CollectionError("profile_directory_wrong_owner")
+    if stat.S_IMODE(details.st_mode) & 0o077:
+        raise CollectionError("profile_directory_not_private")
+    return str(folder)
+
+
+def configured_profile(config, profile_ref, provider=None):
+    """Resolve one opaque profile reference for collector and release helpers."""
+    matches = [profile for profile in config.get("profiles", [])
+               if profile.get("profileRef") == profile_ref]
+    if len(matches) != 1:
+        raise CollectionError("profile_not_configured")
+    profile = matches[0]
+    if provider is not None and profile.get("provider") != provider:
+        raise CollectionError("profile_provider_mismatch")
+    return profile
+
+
+def unique_registry_item(items, key, value, error):
+    matches = [item for item in items if isinstance(item, dict) and item.get(key) == value]
+    if len(matches) != 1:
+        raise CollectionError(error)
+    return matches[0]
+
+
+def load_collector_config(path=DEFAULT_CONFIG):
+    """Load the credential-free private mapping with the collector's size/schema checks."""
+    source = Path(path)
+    try:
+        if source.stat().st_size > MAX_BYTES:
+            raise CollectionError("collector_config_too_large")
+        return validate_config(json.loads(source.read_text()))
+    except CollectionError:
+        raise
+    except Exception:
+        raise CollectionError("collector_config_invalid") from None
+
+
+def resolve_codex_executor(profile_ref, *, config_path=DEFAULT_CONFIG):
+    """Return only vetted process settings for one exact Codex profile."""
+    profile = configured_profile(load_collector_config(config_path), profile_ref, "codex")
+    executor = {"profileRef": profile["profileRef"], "provider": "codex"}
+    if profile.get("codexHome") is not None:
+        executor["codexHome"] = private_profile_directory(profile["codexHome"])
+    return executor
+
+
 def oauth_environment(provider, profile):
     env = dict(os.environ)
     for key in list(env):
@@ -173,7 +245,8 @@ def oauth_environment(provider, profile):
         }:
             env.pop(key, None)
     env["CODEXBAR_ALLOW_BROWSER_COOKIE_IMPORT"] = "0"
-    # CODEX_HOME/HOME are never rewritten. Existing default Codex auth is retained.
+    # HOME is never rewritten. CODEX_HOME is retained for the default profile and
+    # overridden only in this child environment for an explicit Codex profile.
     if profile.get("configDir"):
         if provider != "claude":
             raise CollectionError("profile_directory_unsupported")
@@ -181,6 +254,10 @@ def oauth_environment(provider, profile):
         if not folder.is_dir():
             raise CollectionError("profile_directory_missing", login=True)
         env["CLAUDE_CONFIG_DIR"] = str(folder)
+    if profile.get("codexHome") is not None:
+        if provider != "codex":
+            raise CollectionError("profile_directory_unsupported")
+        env["CODEX_HOME"] = private_profile_directory(profile["codexHome"])
     return env
 
 
@@ -431,6 +508,9 @@ def collect_codex(profile, process_factory=BoundedProcess, *, pacer=None):
         raise CollectionError("subscription_auth_not_verified", login=True)
     if not before.get("planType") or before.get("planType") != after.get("planType"):
         raise CollectionError("subscription_entitlement_unavailable")
+    expected_plan = profile.get("expectedPlanType")
+    if expected_plan and str(before.get("planType")).strip().lower() != expected_plan:
+        raise CollectionError("unexpected_subscription_plan")
     limits = data.get("rateLimitsByLimitId")
     if not isinstance(limits, dict) or not limits:
         legacy = data.get("rateLimits")
@@ -500,7 +580,7 @@ def validate_config(config):
         raise CollectionError("collector_config_invalid")
     seen = set()
     allowed = {"provider", "profileRef", "accountId", "bindingId", "bindingIds", "expectedEmailHash",
-               "configDir", "apiKeyEnv", "pools"}
+               "expectedPlanType", "configDir", "codexHome", "apiKeyEnv", "pools"}
     for profile in config["profiles"]:
         if not isinstance(profile, dict) or set(profile) - allowed:
             raise CollectionError("collector_config_invalid")
@@ -523,8 +603,22 @@ def validate_config(config):
             raise CollectionError("collector_config_invalid")
         if profile["provider"] in {"claude", "codex"} and not expected:
             raise CollectionError("expected_account_identity_required")
+        if profile.get("expectedPlanType") is not None \
+                and (profile["provider"] != "codex" or profile["expectedPlanType"] not in {"plus", "pro"}):
+            raise CollectionError("collector_config_invalid")
         if profile.get("configDir") is not None and (profile["provider"] != "claude" or not isinstance(profile["configDir"], str)):
             raise CollectionError("profile_directory_unsupported")
+        if profile.get("expectedPlanType") == "plus" and profile.get("codexHome") is None:
+            raise CollectionError("profile_directory_required")
+        if profile.get("codexHome") is not None:
+            if profile["provider"] != "codex":
+                raise CollectionError("profile_directory_unsupported")
+            if not isinstance(profile["codexHome"], str) or not Path(profile["codexHome"]).is_absolute():
+                raise CollectionError("profile_directory_invalid")
+            if profile.get("expectedPlanType") is None:
+                raise CollectionError("expected_subscription_plan_required")
+            if profile["expectedPlanType"] != "plus":
+                raise CollectionError("profile_directory_unsupported")
         if "apiKeyEnv" in profile and (profile["provider"] != "zai" or profile["apiKeyEnv"] != ZAI_KEY_ENV):
             raise CollectionError("collector_config_invalid")
         if not isinstance(profile.get("pools"), list) or len(profile["pools"]) > 24:
@@ -548,21 +642,25 @@ def validate_config(config):
 
 
 def check_registry(profile, overview):
-    account = next((item for item in overview.get("accounts", []) if item.get("id") == profile["accountId"]), None)
-    if not account or account.get("provider") not in REGISTRY_PROVIDERS.get(profile["provider"], {profile["provider"]}):
+    accounts, bindings = overview.get("accounts", []), overview.get("bindings", [])
+    account = unique_registry_item(accounts, "id", profile["accountId"], "registry_account_mismatch")
+    if account.get("provider") not in REGISTRY_PROVIDERS.get(profile["provider"], {profile["provider"]}):
         raise CollectionError("registry_account_mismatch")
     expected = profile.get("expectedEmailHash")
     if expected and account.get("identityFingerprint") != expected:
         raise CollectionError("registry_identity_mismatch")
     for pool in profile["pools"]:
-        registered = next((item for item in account.get("pools", []) if item.get("id") == pool["poolId"]), None)
-        if not registered or set(registered.get("windowKeys", [])) != {w["key"] for w in pool["windows"]}:
+        registered = unique_registry_item(account.get("pools", []), "id", pool["poolId"],
+                                          "registry_quota_constraints_mismatch")
+        if set(registered.get("windowKeys", [])) != {w["key"] for w in pool["windows"]}:
             raise CollectionError("registry_quota_constraints_mismatch")
     for binding_id in profile_bindings(profile):
         if binding_id is None:
             continue
-        binding = next((item for item in overview.get("bindings", []) if item.get("id") == binding_id), None)
-        if not binding or binding.get("accountId") != profile["accountId"] or binding.get("profileRef") != profile["profileRef"]:
+        binding = unique_registry_item(bindings, "id", binding_id, "registry_binding_mismatch")
+        if binding.get("accountId") != profile["accountId"] \
+                or binding.get("profileRef") != profile["profileRef"] \
+                or binding.get("runtimeId") not in REGISTRY_RUNTIMES.get(profile["provider"], set()):
             raise CollectionError("registry_binding_mismatch")
 
 
@@ -645,9 +743,7 @@ def main():
     parser.add_argument("--output", type=Path, help="Write sanitized receipt with restrictive permissions")
     args = parser.parse_args()
     try:
-        if args.config.stat().st_size > MAX_BYTES:
-            raise CollectionError("collector_config_too_large")
-        config = validate_config(json.loads(args.config.read_text()))
+        config = load_collector_config(args.config)
         if args.profile:
             selected = set(args.profile)
             if not selected.issubset({p["profileRef"] for p in config["profiles"]}):
