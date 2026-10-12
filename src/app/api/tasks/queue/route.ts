@@ -3,7 +3,7 @@ import { getDatabase } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { agentTaskLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
-import { APPROVED_ONLY_WIP_MAX, DISPATCH_ENABLED_SETTING, countInProgress, resolveDispatchScope } from '@/lib/dispatch-scope'
+import { APPROVED_ONLY_WIP_MAX, DISPATCH_ENABLED_SETTING, factoryInProgress, resolveDispatchScope } from '@/lib/dispatch-scope'
 
 type QueueReason = 'continue_current' | 'assigned' | 'at_capacity' | 'no_tasks_available' | 'dispatch_held'
 
@@ -125,7 +125,7 @@ export async function GET(request: NextRequest) {
     let scopeFilter = ''
     const scopeArgs: string[] = []
     if (scope.eligible_ids !== null) {
-      if (countInProgress(db, scope.eligible_ids) >= APPROVED_ONLY_WIP_MAX) {
+      if (factoryInProgress(db, scope.eligible_ids).length >= APPROVED_ONLY_WIP_MAX) {
         return NextResponse.json({ task: null, reason: 'at_capacity' as QueueReason, held: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached`, agent, timestamp: now })
       }
       const notForThisAgent = [...scope.listed_owners].filter(([, owner]) => owner !== agent).map(([id]) => id)

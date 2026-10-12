@@ -15,6 +15,7 @@ import {
   DISPATCH_HELD_ACTIVITY,
   countInProgress,
   describeHeld,
+  factoryInProgress,
   isHeldActivityDue,
   resolveDispatchScope,
   type DispatchScopeContext,
@@ -755,8 +756,11 @@ const ROUTE_BATCH_LIMIT = 5
 
 type SelectedForDispatch = DispatchableTask & { tags?: string; created_at?: number; via?: 'assigned' | 'routed_this_tick' }
 export interface DispatchSkip { id: number; reason: string; detail?: string }
-/** `in_progress` counts the eligible set under approved_only (the cap), `in_progress_total` every lane. */
-export interface DispatchWip { in_progress: number; in_progress_total: number; max: number | null; free: number | null }
+/**
+ * Under approved_only `in_progress` is what the cap counts (eligible or MC-agent rows, ids in
+ * `holding`); `in_progress_total` counts every lane.
+ */
+export interface DispatchWip { in_progress: number; in_progress_total: number; max: number | null; free: number | null; holding?: number[] }
 
 const ASSIGNED_SELECT = `
     SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
@@ -841,11 +845,11 @@ export function selectAssignedForDispatch(
   if (ctx.eligible_ids === null) {
     return { tasks: eligible.slice(0, DISPATCH_BATCH_LIMIT), skipped, wip: { in_progress: total, in_progress_total: total, max: null, free: null } }
   }
-  const inProgress = countInProgress(db, ctx.eligible_ids)
-  const free = Math.max(0, APPROVED_ONLY_WIP_MAX - inProgress)
+  const holding = factoryInProgress(db, ctx.eligible_ids)
+  const free = Math.max(0, APPROVED_ONLY_WIP_MAX - holding.length)
   const take = Math.min(free, DISPATCH_BATCH_LIMIT)
   for (const row of eligible.slice(take)) skipped.push({ id: row.id, reason: free === 0 ? 'wip_cap' : 'batch_limit' })
-  return { tasks: eligible.slice(0, take), skipped, wip: { in_progress: inProgress, in_progress_total: total, max: APPROVED_ONLY_WIP_MAX, free } }
+  return { tasks: eligible.slice(0, take), skipped, wip: { in_progress: holding.length, in_progress_total: total, max: APPROVED_ONLY_WIP_MAX, free, holding } }
 }
 
 /**
@@ -883,7 +887,7 @@ function stillAllowed(
     if (opts.assignedTo !== undefined && owner !== undefined && opts.assignedTo !== owner) {
       return { ok: false, stop: false, message: `task ${taskId} is approved for ${owner}, not ${opts.assignedTo}` }
     }
-    if (opts.wip && countInProgress(db, live.eligible_ids) >= APPROVED_ONLY_WIP_MAX) return { ok: false, stop: true, message: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached` }
+    if (opts.wip && factoryInProgress(db, live.eligible_ids).length >= APPROVED_ONLY_WIP_MAX) return { ok: false, stop: true, message: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached` }
   }
   return { ok: true }
 }

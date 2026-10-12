@@ -163,7 +163,7 @@ describe('A4: plan selects only what the morning meeting approved', () => {
       { id: 10, title: 'Research competitor pricing', priority: 'low', to: 'reidar', via: 'owner' },
     ])
     expect(plan.dispatch.map(d => d.id)).toEqual([11, 12, 13])
-    expect(plan.wip).toEqual({ in_progress: 0, in_progress_total: 0, max: 3, free: 3 })
+    expect(plan.wip).toEqual({ in_progress: 0, in_progress_total: 0, max: 3, free: 3, holding: [] })
     expect(plan.not_selected).toContainEqual({ id: 10, reason: 'batch_limit' })
 
     const touched = new Set([...plan.route.map(r => r.id), ...plan.dispatch.map(d => d.id)])
@@ -187,9 +187,9 @@ describe('A4: plan selects only what the morning meeting approved', () => {
     expect(plan.not_selected).toContainEqual(expect.objectContaining({ id: 11, reason: 'owner_mismatch' }))
   })
 
-  it('WIP: at most 3 of the approved tasks in_progress; other lanes cannot hold the cap', () => {
+  it('WIP: at most 3 factory tasks in_progress; other lanes cannot hold the cap', () => {
     seedA4Board()
-    // Three unapproved rows in progress (another lane, or zombies): they do not count.
+    // Three unapproved rows in progress owned by a non-MC lane: they do not count.
     for (const id of [40, 41, 42]) addTask(mock.db, { id, status: 'in_progress', assigned_to: 'someone' })
     expect(planDispatch(mock.db).dispatch.map(d => d.id)).toEqual([11, 12, 13])
     // Two approved children already running leave one slot.
@@ -199,8 +199,20 @@ describe('A4: plan selects only what the morning meeting approved', () => {
     addTask(mock.db, { id: 45, status: 'in_progress', assigned_to: 'reidar', metadata: { outcome_task_id: 10 } })
     const full = planDispatch(mock.db)
     expect(full.dispatch).toEqual([])
-    expect(full.wip).toEqual({ in_progress: 3, in_progress_total: 6, max: 3, free: 0 })
+    expect(full.wip).toEqual({ in_progress: 3, in_progress_total: 6, max: 3, free: 0, holding: [43, 44, 45] })
     expect(full.not_selected).toContainEqual({ id: 11, reason: 'wip_cap' })
+  })
+
+  it('WIP: runs started under an earlier list still count after the list changes (review N1)', () => {
+    seedA4Board()
+    // Yesterday's outcomes, run by MC agents, are still in progress; today's list is different.
+    addTask(mock.db, { id: 90, status: 'in_progress', assigned_to: 'reidar' })
+    addTask(mock.db, { id: 91, status: 'in_progress', assigned_to: 'stella' })
+    expect(planDispatch(mock.db).dispatch.map(d => d.id)).toEqual([11])
+    addTask(mock.db, { id: 92, status: 'in_progress', assigned_to: 'vera' })
+    const plan = planDispatch(mock.db)
+    expect(plan.dispatch).toEqual([])
+    expect(plan.wip).toMatchObject({ in_progress: 3, free: 0, holding: [90, 91, 92] })
   })
 
   it('at most 5 children per approved outcome, lowest ids first', () => {

@@ -12,8 +12,10 @@
  *   id (MC has no parent column; one level only).
  * - missing, unparseable or older than 36 h: nothing qualifies. The scheduler moves
  *   nothing and writes one activity line (rate-limited), never falling back to `all`.
- * - at most 3 of those eligible tasks `in_progress` at once (the factory's own work in
- *   flight; other lanes' `in_progress` rows do not count, so they cannot hold the cap).
+ * - at most 3 factory tasks `in_progress` at once: every `in_progress` row that is eligible
+ *   now OR assigned to an MC agent (only those can have come from dispatch, under any earlier
+ *   list). Rows of other lanes (claude-code:*, codex:*, people) do not count, so they cannot
+ *   hold the cap shut; yesterday's runs still do when the list changes.
  * - at most 5 children per approved outcome, lowest ids first.
  *
  * `general.task_dispatch_scope` absent or anything but the exact string `all` means
@@ -220,12 +222,23 @@ export function resolveDispatchScope(db: Db, now = Math.floor(Date.now() / 1000)
   return { ...base, held_reason: null, listed_owners, children, capped_children: capped, eligible_ids }
 }
 
-/** `in_progress` rows, optionally only among `ids` (the eligible set). */
-export function countInProgress(db: Db, ids?: Set<number> | null): number {
-  if (!ids) return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress'").get() as { c: number }).c
-  if (ids.size === 0) return 0
-  return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress' AND id IN (SELECT value FROM json_each(?))")
-    .get(JSON.stringify([...ids])) as { c: number }).c
+/** Every `in_progress` row, whoever started it. */
+export function countInProgress(db: Db): number {
+  return (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status = 'in_progress'").get() as { c: number }).c
+}
+
+/**
+ * The rows the WIP cap counts: `in_progress` and either eligible now or assigned to an MC
+ * agent in their workspace (dispatch only ever runs MC agents, so this covers the factory's
+ * runs from earlier lists too).
+ */
+export function factoryInProgress(db: Db, eligible: Set<number>): number[] {
+  return (db.prepare(`
+    SELECT t.id FROM tasks t
+    WHERE t.status = 'in_progress'
+      AND (t.id IN (SELECT value FROM json_each(?))
+           OR EXISTS (SELECT 1 FROM agents a WHERE a.name = t.assigned_to AND a.workspace_id = t.workspace_id))
+    ORDER BY t.id`).all(JSON.stringify([...eligible])) as Array<{ id: number }>).map(r => r.id)
 }
 
 export function describeHeld(ctx: DispatchScopeContext): string {

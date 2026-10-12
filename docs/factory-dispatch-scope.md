@@ -18,9 +18,11 @@ Under `approved_only`:
   routed, dispatched, handed out by the queue or stale-requeued.
 - A listed task is routed only to its approved `owner`, and dispatched only while
   `assigned_to` equals that owner. Children are routed by the usual scoring.
-- At most **3** of those eligible tasks `in_progress` at once, re-checked before every
-  claim. Other lanes' `in_progress` rows do not count, so they cannot hold the cap shut
-  (the plan shows both numbers).
+- At most **3** factory tasks `in_progress` at once, re-checked before every claim. The cap
+  counts every `in_progress` row that is eligible now or assigned to an MC agent, so runs
+  started under yesterday's list still count after the list changes. Rows of other lanes
+  (`claude-code:*`, `codex:*`, people) do not, so they cannot hold the cap shut. The plan
+  shows the ids holding it (`wip.holding`) and the total of every lane.
 - The queue still returns an agent's own running task (`continue_current`); a new claim
   answers `reason: dispatch_held` while the switch is off or the list is held.
 - A list older than **36 h** (server-stamped `approved_at`), missing or unparseable holds
@@ -50,8 +52,10 @@ executed by their native lane, not by this scheduler.
    task's single observed owner, non-empty `sources` and `acceptance`, `--date` today or
    yesterday), stamps `approved_at` and returns the resulting plan. It never touches
    `general.task_dispatch`. Re-sending the outcomes already stored does not restart the
-   36 h clock (`UNCHANGED`); approving the same outcomes again on a new day needs
-   `--reapprove`.
+   36 h clock (`UNCHANGED`); an outcome that continues from yesterday must be approved
+   again with `--reapprove`, or the factory holds once the 36 h run out.
+   An outcome's first 5 children (lowest ids, finished ones included) are eligible; more
+   than that is a sign to split the outcome in the meeting.
 4. Check what the next tick would take, without moving anything:
 
    ```bash
