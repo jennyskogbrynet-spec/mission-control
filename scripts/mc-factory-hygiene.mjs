@@ -6,6 +6,8 @@
  *   leases    claims idle past the lease -> Unclaimed        (dry run by default)
  *   intake    open tasks per intake source vs. the WIP caps; --promote brings deferred ones back
  *   measure   all three, read-only, one summary
+ *   dispatch  --plan: what the next task_dispatch tick would route/dispatch (read-only, F2)
+ *   approve   load the morning meeting's approved-outcomes.json into the dispatch brake
  *
  * Everything goes through the MC HTTP API (auth, workspace scope, audit log, SSE all
  * stay server-side). GitHub is read with `gh api` here, never in the API route.
@@ -17,7 +19,7 @@
  * Nothing is written without --apply. --apply moves tasks to `review`, never `done`.
  */
 import { execFile, execFileSync } from 'node:child_process'
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -215,16 +217,74 @@ export async function runMeasure(flags, deps) {
   return { exit: 0, closure, leases, intake }
 }
 
-const USAGE = `usage: mc-factory-hygiene.mjs <closure|leases|intake|measure> [flags]
+function printPlan(plan, log) {
+  const a = plan.approved
+  line(log, `dispatch=${plan.dispatch_enabled ? 'ON' : 'OFF'}  scope=${plan.scope}${plan.scope_setting === null ? ' (setting absent)' : ''}  approved=${a.state}${a.date ? ` ${a.date}` : ''}${a.age_hours !== null ? ` age=${a.age_hours}h/${a.max_age_hours}h` : ''}${a.problem ? ` (${a.problem})` : ''}`)
+  for (const o of a.outcomes) line(log, `  APPROVED #${o.task_id} owner=${o.owner}  ${String(o.outcome).slice(0, 80)}`)
+  for (const c of a.children) line(log, `  CHILD    #${c.task_id} of #${c.outcome_task_id}`)
+  if (plan.held_reason) line(log, `HELD: ${plan.held_reason}  ->  ${plan.held_activity?.description}${plan.held_activity?.due ? '' : ' (line already written this hour)'}`)
+  line(log, `wip: in_progress=${plan.wip.in_progress} max=${plan.wip.max ?? '-'} free=${plan.wip.free ?? '-'}`)
+  for (const r of plan.route) line(log, `  ROUTE    #${r.id} [${r.priority}] -> ${r.to} (${r.via})  ${String(r.title).slice(0, 70)}`)
+  for (const d of plan.dispatch) line(log, `  DISPATCH #${d.id} [${d.priority}] -> ${d.assigned_to}${d.via === 'routed_this_tick' ? ' (after routing)' : ''}  ${String(d.title).slice(0, 70)}`)
+  for (const n of plan.not_selected) line(log, `  HOLD     #${n.id} ${n.reason}${n.detail ? `: ${n.detail}` : ''}`)
+  line(log, `next tick: ${plan.next_tick.runs ? 'runs' : 'moves nothing'}  route=${plan.next_tick.would_route} dispatch=${plan.next_tick.would_dispatch}`)
+}
+
+/** Read-only. `--plan` is required so nobody mistakes this for a way to start dispatch. */
+export async function runDispatch(flags, { request, log = console.log }) {
+  if (flags.plan !== true) {
+    line(log, 'dispatch only has a plan mode: mc-factory-hygiene.mjs dispatch --plan [--json]. The scheduler dispatches; this never does.')
+    return { exit: 2 }
+  }
+  const { plan } = await request('/api/tasks/dispatch-plan')
+  if (flags.json === true) line(log, JSON.stringify(plan, null, 2))
+  else printPlan(plan, log)
+  return { exit: 0, plan }
+}
+
+/**
+ * Validate the morning meeting's approved-outcomes.json against the live board and, with
+ * --apply, make it the list the dispatch brake reads. Never touches general.task_dispatch.
+ */
+export async function runApprove(flags, { request, log = console.log, readFile = (f) => readFileSync(f, 'utf8') }) {
+  if (typeof flags.outcomes !== 'string') {
+    line(log, 'approve needs --outcomes <approved-outcomes.json>')
+    return { exit: 2 }
+  }
+  let outcomes
+  try {
+    outcomes = JSON.parse(readFile(flags.outcomes))
+  } catch (error) {
+    line(log, `cannot read ${flags.outcomes}: ${error.message}`)
+    return { exit: 2 }
+  }
+  const apply = flags.apply === true
+  const body = { outcomes, apply, ...(typeof flags.date === 'string' ? { date: flags.date } : {}), source: 'morning-meeting' }
+  const result = await request('/api/tasks/dispatch-approved', 'POST', body)
+  if (result.errors?.length) {
+    for (const e of result.errors) line(log, `  INVALID ${e}`)
+    return { exit: 1, result }
+  }
+  const list = result.written?.value ?? result.would_write?.value
+  line(log, `${apply ? 'APPROVED' : 'WOULD APPROVE'} ${list.outcomes.length} outcome(s) for ${list.date}: ${list.outcomes.map((o) => `#${o.task_id} (${o.owner})`).join(', ')}`)
+  for (const n of result.notes ?? []) line(log, `  NOTE #${n.task_id} ${n.note}`)
+  if (!apply) line(log, 'DRY RUN: nothing written. Re-run with --apply.')
+  else if (result.plan) printPlan(result.plan, log)
+  return { exit: 0, result }
+}
+
+const USAGE = `usage: mc-factory-hygiene.mjs <closure|leases|intake|measure|dispatch|approve> [flags]
   closure  [--project <slug>] [--backfill] [--apply] [--task-ids 1,2] [--write-snapshot <file>] [--no-gh] [--concurrency 6]
   leases   [--lease-hours 72] [--apply]
   intake   [--promote [--apply]]
-  measure  [--project <slug>]        (read-only)`
+  measure  [--project <slug>]        (read-only)
+  dispatch --plan [--json]           (read-only: what the next dispatch tick would take)
+  approve  --outcomes <approved-outcomes.json> [--date YYYY-MM-DD] [--apply]`
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 if (isMain) {
   const { cmd, flags } = parseArgs(process.argv.slice(2))
-  const runners = { closure: runClosure, leases: runLeases, intake: runIntake, measure: runMeasure }
+  const runners = { closure: runClosure, leases: runLeases, intake: runIntake, measure: runMeasure, dispatch: runDispatch, approve: runApprove }
   if (!runners[cmd]) {
     console.error(USAGE)
     process.exit(2)

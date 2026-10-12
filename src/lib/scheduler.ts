@@ -420,6 +420,9 @@ export function initScheduler() {
     running: false,
   })
 
+  // The factory. OFF unless `general.task_dispatch` is exactly "true" (F2: an absent row
+  // no longer means on), and under `general.task_dispatch_scope` = approved_only (the
+  // default) it only moves what the morning meeting approved. See dispatch-scope.ts.
   tasks.set('task_dispatch', {
     name: 'Task Dispatch',
     intervalMs: TICK_MS, // Every 60s — check for assigned tasks to dispatch
@@ -500,7 +503,7 @@ async function tick() {
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : id === 'claim_lease_sweep' ? CLAIM_LEASE_SWEEP_SETTING
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
@@ -560,7 +563,7 @@ export function getSchedulerStatus() {
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : id === 'claim_lease_sweep' ? CLAIM_LEASE_SWEEP_SETTING
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'auto_backup' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,

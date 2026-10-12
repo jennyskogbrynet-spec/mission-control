@@ -13,7 +13,11 @@ beforeEach(() => {
   vi.clearAllMocks()
   mock.db = new Database(':memory:')
   mock.db.exec(`CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, description TEXT, priority TEXT, tags TEXT, workspace_id INTEGER, metadata TEXT, status TEXT, assigned_to TEXT, created_at INTEGER, updated_at INTEGER);
-    CREATE TABLE agents (id INTEGER PRIMARY KEY, name TEXT, role TEXT, status TEXT, config TEXT, workspace_id INTEGER, hidden INTEGER DEFAULT 0);`)
+    CREATE TABLE agents (id INTEGER PRIMARY KEY, name TEXT, role TEXT, status TEXT, config TEXT, workspace_id INTEGER, hidden INTEGER DEFAULT 0);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    -- These cases pin the legacy whole-queue selection, so they run with the factory on and
+    -- scope 'all' (both are off/approved_only by default since F2; see dispatch-scope tests).
+    INSERT INTO settings VALUES ('general.task_dispatch','true'),('general.task_dispatch_scope','all');`)
 })
 afterEach(() => mock.db.close())
 it('routes within the task workspace, and account-bound inbox tasks do not starve the legacy queue', async () => {

@@ -8,6 +8,17 @@ import { logger } from './logger'
 import { config } from './config'
 import { syncTaskOutbound } from './github-sync-engine'
 import { isActiveClaim } from './claim-time'
+import {
+  APPROVED_MAX_AGE_HOURS,
+  APPROVED_ONLY_WIP_MAX,
+  DISPATCH_ENABLED_SETTING,
+  DISPATCH_HELD_ACTIVITY,
+  countInProgress,
+  describeHeld,
+  isHeldActivityDue,
+  resolveDispatchScope,
+  type DispatchScopeContext,
+} from './dispatch-scope'
 
 /** Timeout for gateway task dispatch CLI calls. Configurable via MC_GATEWAY_TASK_DISPATCH_TIMEOUT_MS env var (default: 600000ms). */
 const TASK_DISPATCH_TIMEOUT_MS = parseInt(process.env['MC_GATEWAY_TASK_DISPATCH_TIMEOUT_MS'] ?? '600000', 10)
@@ -625,11 +636,19 @@ function normalizeGatewayAgentId(value: string | null | undefined): string {
 /**
  * Requeue stale tasks stuck in 'in_progress' whose assigned agent is offline.
  * Prevents tasks from being permanently stuck when agents crash or disconnect.
+ *
+ * Under `approved_only` (F2) this housekeeping only touches tasks the current morning
+ * meeting approved (listed or `outcome_task_id` children); with no fresh list it touches
+ * nothing. It moves tasks to `assigned` or `failed`, so it must not reach past the brake.
  */
 export async function requeueStaleTasks(): Promise<{ ok: boolean; message: string }> {
   const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   const earliestPolicyThreshold = now - 1 * 60
+  const scope = resolveDispatchScope(db, now)
+  if (scope.eligible_ids !== null && scope.eligible_ids.size === 0) {
+    return { ok: true, message: scope.held_reason ? `Stale requeue held: ${scope.held_reason}` : 'No approved tasks to requeue' }
+  }
 
   const staleTasks = db.prepare(`
     SELECT t.id, t.title, t.assigned_to, t.dispatch_attempts, t.workspace_id,
@@ -653,6 +672,7 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   let failed = 0
 
   for (const task of staleTasks) {
+    if (scope.eligible_ids !== null && !scope.eligible_ids.has(task.id)) continue
     const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
     if (!resourcePolicy.zombieReaper) continue
     const staleThreshold = now - resourcePolicy.staleAfterMinutes * 60
@@ -714,10 +734,19 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   }
 }
 
-export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: string }> {
-  const db = getDatabase()
+// ---------------------------------------------------------------------------
+// Dispatch scope (F2): the selection both the scheduler and the plan use
+// ---------------------------------------------------------------------------
 
-  const tasks = db.prepare(`
+const DISPATCH_OFF_MESSAGE = `Task dispatch is off (${DISPATCH_ENABLED_SETTING} is not "true"); nothing moved`
+/** Per tick, as before F2. */
+const DISPATCH_BATCH_LIMIT = 3
+const ROUTE_BATCH_LIMIT = 5
+
+type SelectedForDispatch = DispatchableTask & { tags?: string; created_at?: number; via?: 'assigned' | 'routed_this_tick' }
+export interface DispatchSkip { id: number; reason: string; detail?: string }
+
+const ASSIGNED_SELECT = `
     SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
            p.ticket_prefix, t.project_ticket_no
     FROM tasks t
@@ -725,15 +754,141 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
     WHERE t.status = 'assigned'
       AND t.assigned_to IS NOT NULL
-      AND CASE WHEN json_valid(t.metadata) THEN json_type(t.metadata, '$.compute_route') IS NULL ELSE 1 END
+      AND CASE WHEN json_valid(t.metadata) THEN json_type(t.metadata, '$.compute_route') IS NULL ELSE 1 END`
+const PRIORITY_ORDER_SQL = `
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
-      t.created_at ASC
-    LIMIT 3
-  `).all() as (DispatchableTask & { tags?: string })[]
+      t.created_at ASC, t.id ASC`
+
+function priorityRank(priority: string | null | undefined): number {
+  return priority === 'critical' ? 0 : priority === 'high' ? 1 : priority === 'medium' ? 2 : 3
+}
+
+function compareDispatchOrder(a: SelectedForDispatch, b: SelectedForDispatch): number {
+  return priorityRank(a.priority) - priorityRank(b.priority)
+    || Number(a.created_at ?? 0) - Number(b.created_at ?? 0)
+    || a.id - b.id
+}
+
+/**
+ * Which `assigned` tasks the next dispatch would move to `in_progress`.
+ *
+ * `all`: the legacy query (top 3 by priority, then age). `approved_only`: only eligible ids,
+ * a listed task only when it is assigned to its approved owner, and no more than the free
+ * WIP slots (3 minus everything already `in_progress`). `routed` adds the tasks the same
+ * tick would route first (plan mode), as if already assigned.
+ */
+export function selectAssignedForDispatch(
+  db: ReturnType<typeof getDatabase>,
+  ctx: DispatchScopeContext,
+  routed: Array<{ id: number; agent: string }> = [],
+): { tasks: SelectedForDispatch[]; skipped: DispatchSkip[]; wip: { in_progress: number; max: number | null; free: number | null } } {
+  const skipped: DispatchSkip[] = []
+  if (ctx.held_reason || (ctx.eligible_ids && ctx.eligible_ids.size === 0)) {
+    return { tasks: [], skipped, wip: { in_progress: countInProgress(db), max: APPROVED_ONLY_WIP_MAX, free: 0 } }
+  }
+
+  let rows: SelectedForDispatch[]
+  if (ctx.eligible_ids === null) {
+    rows = db.prepare(`${ASSIGNED_SELECT}${PRIORITY_ORDER_SQL} LIMIT ${DISPATCH_BATCH_LIMIT}`).all() as SelectedForDispatch[]
+  } else {
+    rows = db.prepare(`${ASSIGNED_SELECT} AND t.id IN (SELECT value FROM json_each(?))${PRIORITY_ORDER_SQL}`)
+      .all(JSON.stringify([...ctx.eligible_ids])) as SelectedForDispatch[]
+  }
+  for (const row of rows) row.via = 'assigned'
+
+  for (const r of routed) {
+    const row = db.prepare(`
+      SELECT t.*, a.name as agent_name, a.id as agent_id, a.config as agent_config,
+             p.ticket_prefix, t.project_ticket_no
+      FROM tasks t
+      JOIN agents a ON a.name = ? AND a.workspace_id = t.workspace_id
+      LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
+      WHERE t.id = ?
+    `).get(r.agent, r.id) as SelectedForDispatch | undefined
+    if (!row) continue
+    rows.push({ ...row, status: 'assigned', assigned_to: r.agent, via: 'routed_this_tick' })
+  }
+  rows.sort(compareDispatchOrder)
+
+  const eligible: SelectedForDispatch[] = []
+  for (const row of rows) {
+    if (isManagedComputeTask(row.metadata)) {
+      skipped.push({ id: row.id, reason: 'managed_compute' })
+      continue
+    }
+    const owner = ctx.listed_owners.get(row.id)
+    if (owner !== undefined && row.assigned_to !== owner) {
+      skipped.push({ id: row.id, reason: 'owner_mismatch', detail: `assigned to ${row.assigned_to}, approved owner ${owner}` })
+      continue
+    }
+    eligible.push(row)
+  }
+
+  if (ctx.eligible_ids === null) {
+    return { tasks: eligible.slice(0, DISPATCH_BATCH_LIMIT), skipped, wip: { in_progress: countInProgress(db), max: null, free: null } }
+  }
+  const inProgress = countInProgress(db)
+  const free = Math.max(0, APPROVED_ONLY_WIP_MAX - inProgress)
+  const take = Math.min(free, DISPATCH_BATCH_LIMIT)
+  for (const row of eligible.slice(take)) skipped.push({ id: row.id, reason: free === 0 ? 'wip_cap' : 'batch_limit' })
+  return { tasks: eligible.slice(0, take), skipped, wip: { in_progress: inProgress, max: APPROVED_ONLY_WIP_MAX, free } }
+}
+
+/**
+ * Write the held line at most once per hour per reason (see dispatch-scope.ts).
+ * Returns whether a line was written.
+ */
+function noteDispatchHeld(db: ReturnType<typeof getDatabase>, ctx: DispatchScopeContext): boolean {
+  if (!ctx.held_reason || !isHeldActivityDue(db, ctx.held_reason, ctx.now)) return false
+  db_helpers.logActivity(DISPATCH_HELD_ACTIVITY, 'system', 0, 'scheduler', describeHeld(ctx), {
+    reason: ctx.held_reason,
+    approved_state: ctx.approved.state,
+    approved_date: ctx.approved.list?.date ?? null,
+    approved_age_hours: ctx.approved.age_hours,
+    max_age_hours: APPROVED_MAX_AGE_HOURS,
+    problem: ctx.approved.problem,
+  }, 1)
+  return true
+}
+
+/** Is this task still dispatchable right now? Re-read before every claim (kill switch, list, WIP). */
+function stillAllowed(
+  db: ReturnType<typeof getDatabase>,
+  taskId: number,
+  opts: { wip: boolean } = { wip: true },
+): { ok: true } | { ok: false; stop: boolean; message: string } {
+  const live = resolveDispatchScope(db)
+  if (!live.enabled) return { ok: false, stop: true, message: DISPATCH_OFF_MESSAGE }
+  if (live.held_reason) {
+    noteDispatchHeld(db, live)
+    return { ok: false, stop: true, message: describeHeld(live) }
+  }
+  if (live.eligible_ids !== null) {
+    if (!live.eligible_ids.has(taskId)) return { ok: false, stop: false, message: `task ${taskId} is no longer approved` }
+    if (opts.wip && countInProgress(db) >= APPROVED_ONLY_WIP_MAX) return { ok: false, stop: true, message: `WIP cap ${APPROVED_ONLY_WIP_MAX} reached` }
+  }
+  return { ok: true }
+}
+
+export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: string }> {
+  const db = getDatabase()
+
+  const ctx = resolveDispatchScope(db)
+  if (!ctx.enabled) return { ok: true, message: DISPATCH_OFF_MESSAGE }
+  if (ctx.held_reason) {
+    noteDispatchHeld(db, ctx)
+    return { ok: true, message: describeHeld(ctx) }
+  }
+
+  const selection = selectAssignedForDispatch(db, ctx)
+  const tasks = selection.tasks
 
   if (tasks.length === 0) {
-    return { ok: true, message: 'No assigned tasks to dispatch' }
+    return {
+      ok: true,
+      message: selection.wip.free === 0 ? `WIP cap ${APPROVED_ONLY_WIP_MAX} reached; nothing dispatched` : 'No assigned tasks to dispatch',
+    }
   }
 
   // Global backstop — leave the tasks in 'assigned' and stop rather than keep
@@ -752,10 +907,18 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   const results: Array<{ id: number; success: boolean; error?: string }> = []
   const now = Math.floor(Date.now() / 1000)
+  let stoppedBy: string | null = null
 
   for (const task of tasks) {
     // Account-bound work belongs to the capacity preflight and subscription runner.
     if (isManagedComputeTask(task.metadata)) continue
+    // An earlier task in this batch may have run for minutes. The kill switch, the
+    // approved list and the WIP cap are re-read right before every claim.
+    const allowed = stillAllowed(db, task.id)
+    if (!allowed.ok) {
+      if (allowed.stop) { stoppedBy = allowed.message; break }
+      continue
+    }
     const resourcePolicy = resolveDispatchResourcePolicy(task.metadata)
     // Set once the task prompt may have reached the agent. From that point a
     // failure is AMBIGUOUS (the agent may be working) and must not auto-retry.
@@ -1038,7 +1201,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
   return {
     ok: failed.length === 0,
-    message: `Dispatched ${succeeded}/${tasks.length} tasks${failSummary}`,
+    message: `Dispatched ${succeeded}/${tasks.length} tasks${failSummary}${stoppedBy ? ` (stopped: ${stoppedBy})` : ''}`,
   }
 }
 
@@ -1091,50 +1254,86 @@ function scoreAgentForTask(
   return Math.max(score, 1)
 }
 
-/**
- * Auto-route inbox tasks to the best available agent.
- * Runs before dispatch — moves tasks from inbox → assigned.
- */
-export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: string }> {
-  const db = getDatabase()
+type InboxRow = { id: number; title: string; description: string | null; priority: string; tags: string | null; workspace_id: number; metadata: string | null }
+type RoutableAgent = { id: number; name: string; role: string; status: string; config: string | null; workspace_id: number }
+export interface RouteDecision { task: InboxRow; agent: RoutableAgent; score: number; via: 'owner' | 'score' | 'score_alternate' }
 
+const AGENT_IN_PROGRESS_CAP = 3
+
+/**
+ * Which inbox tasks the next tick would route, and to whom. Pure read, shared by
+ * autoRouteInboxTasks() and the plan. A task the morning meeting listed goes to its
+ * approved owner or nowhere; every other eligible task (scope `all`, or an
+ * `outcome_task_id` child) is scored as before F2.
+ */
+export function planInboxRouting(
+  db: ReturnType<typeof getDatabase>,
+  ctx: DispatchScopeContext,
+): { inbox: InboxRow[]; agentsAvailable: number; decisions: RouteDecision[]; skipped: DispatchSkip[] } {
+  const skipped: DispatchSkip[] = []
+  if (ctx.held_reason || (ctx.eligible_ids && ctx.eligible_ids.size === 0)) {
+    return { inbox: [], agentsAvailable: 0, decisions: [], skipped }
+  }
+
+  const scoped = ctx.eligible_ids !== null
   const inboxTasks = db.prepare(`
     SELECT id, title, description, priority, tags, workspace_id, metadata
     FROM tasks
     WHERE status = 'inbox' AND assigned_to IS NULL
       AND CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.compute_route') IS NULL ELSE 1 END
+      ${scoped ? 'AND id IN (SELECT value FROM json_each(?))' : ''}
     ORDER BY
       CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
-      created_at ASC
-    LIMIT 5
-  `).all() as Array<{ id: number; title: string; description: string | null; priority: string; tags: string | null; workspace_id: number; metadata: string | null }>
+      created_at ASC, id ASC
+    LIMIT ${ROUTE_BATCH_LIMIT}
+  `).all(...(scoped ? [JSON.stringify([...ctx.eligible_ids!])] : [])) as InboxRow[]
 
-  if (inboxTasks.length === 0) {
-    return { ok: true, message: 'No inbox tasks to route' }
-  }
+  if (inboxTasks.length === 0) return { inbox: [], agentsAvailable: 0, decisions: [], skipped }
 
   // Get all non-hidden, non-offline agents
   const agents = db.prepare(`
     SELECT id, name, role, status, config, workspace_id
     FROM agents
     WHERE hidden = 0 AND status NOT IN ('offline', 'error')
-  `).all() as Array<{ id: number; name: string; role: string; status: string; config: string | null; workspace_id: number }>
+  `).all() as RoutableAgent[]
 
   if (agents.length === 0) {
-    return { ok: true, message: `${inboxTasks.length} inbox task(s) but no available agents` }
+    for (const t of inboxTasks) skipped.push({ id: t.id, reason: 'no_available_agents' })
+    return { inbox: inboxTasks, agentsAvailable: 0, decisions: [], skipped }
   }
 
-  let routed = 0
-  const now = Math.floor(Date.now() / 1000)
+  const inProgressOf = (name: string, workspaceId: number) => (db.prepare(
+    'SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND status = \'in_progress\' AND workspace_id = ?'
+  ).get(name, workspaceId) as { c: number }).c
 
+  const decisions: RouteDecision[] = []
   for (const task of inboxTasks) {
-    if (isManagedComputeTask(task.metadata)) continue
+    if (isManagedComputeTask(task.metadata)) {
+      skipped.push({ id: task.id, reason: 'managed_compute' })
+      continue
+    }
     const taskText = `${task.title} ${task.description || ''}`
     let parsedTags: string[] = []
     if (task.tags) {
       try { parsedTags = JSON.parse(task.tags) } catch { /* ignore */ }
     }
     const fullText = `${taskText} ${parsedTags.join(' ')}`
+
+    const owner = ctx.listed_owners.get(task.id)
+    if (owner !== undefined) {
+      const agent = agents.find(a => a.name === owner && a.workspace_id === task.workspace_id)
+      const score = agent ? scoreAgentForTask(agent, fullText) : -1
+      if (!agent || score <= 0) {
+        skipped.push({ id: task.id, reason: 'owner_not_available', detail: `approved owner ${owner} is not an available MC agent in this workspace` })
+        continue
+      }
+      if (inProgressOf(agent.name, task.workspace_id) >= AGENT_IN_PROGRESS_CAP) {
+        skipped.push({ id: task.id, reason: 'owner_at_capacity', detail: owner })
+        continue
+      }
+      decisions.push({ task, agent, score, via: 'owner' })
+      continue
+    }
 
     // Score each agent
     const scored = agents
@@ -1143,49 +1342,74 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
       .filter(s => s.score > 0)
       .sort((a, b) => b.score - a.score)
 
-    if (scored.length === 0) continue
-
-    const best = scored[0].agent
-
-    // Check capacity — skip agents with 3+ in-progress tasks
-    const inProgressCount = (db.prepare(
-      'SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND status = \'in_progress\' AND workspace_id = ?'
-    ).get(best.name, task.workspace_id) as { c: number }).c
-
-    if (inProgressCount >= 3) {
-      // Try next best agent
-      const alt = scored.find(s => {
-        const c = (db.prepare(
-          'SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND status = \'in_progress\' AND workspace_id = ?'
-        ).get(s.agent.name, task.workspace_id) as { c: number }).c
-        return c < 3
-      })
-      if (!alt) continue // all agents at capacity
-      const changed = db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = ? AND assigned_to IS NULL')
-        .run('assigned', alt.agent.name, now, task.id, task.workspace_id, 'inbox').changes
-      if (!changed) continue
-
-      db_helpers.logActivity('task_auto_routed', 'task', task.id, 'scheduler',
-        `Auto-assigned "${task.title}" to ${alt.agent.name} (${alt.agent.role}, score: ${alt.score})`,
-        { agent: alt.agent.name, role: alt.agent.role, score: alt.score },
-        task.workspace_id)
-
-      eventBus.broadcast('task.status_changed', { id: task.id, status: 'assigned', previous_status: 'inbox', assigned_to: alt.agent.name })
-      syncAndEscalateIfFailed(task as any, 'assigned')
-      routed++
+    if (scored.length === 0) {
+      skipped.push({ id: task.id, reason: 'no_suitable_agent' })
       continue
     }
 
+    // Check capacity — skip agents with 3+ in-progress tasks
+    if (inProgressOf(scored[0].agent.name, task.workspace_id) >= AGENT_IN_PROGRESS_CAP) {
+      // Try next best agent
+      const alt = scored.find(s => inProgressOf(s.agent.name, task.workspace_id) < AGENT_IN_PROGRESS_CAP)
+      if (!alt) {
+        skipped.push({ id: task.id, reason: 'agents_at_capacity' })
+        continue
+      }
+      decisions.push({ task, agent: alt.agent, score: alt.score, via: 'score_alternate' })
+      continue
+    }
+    decisions.push({ task, agent: scored[0].agent, score: scored[0].score, via: 'score' })
+  }
+  return { inbox: inboxTasks, agentsAvailable: agents.length, decisions, skipped }
+}
+
+/**
+ * Auto-route inbox tasks to the best available agent.
+ * Runs before dispatch — moves tasks from inbox → assigned.
+ * Under `approved_only` only approved tasks move, and a listed one only to its owner.
+ */
+export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: string }> {
+  const db = getDatabase()
+
+  const ctx = resolveDispatchScope(db)
+  if (!ctx.enabled) return { ok: true, message: DISPATCH_OFF_MESSAGE }
+  if (ctx.held_reason) {
+    noteDispatchHeld(db, ctx)
+    return { ok: true, message: describeHeld(ctx) }
+  }
+
+  const plan = planInboxRouting(db, ctx)
+  const inboxCount = plan.inbox.length
+
+  if (inboxCount === 0) {
+    return { ok: true, message: 'No inbox tasks to route' }
+  }
+
+  if (plan.agentsAvailable === 0) {
+    return { ok: true, message: `${inboxCount} inbox task(s) but no available agents` }
+  }
+
+  let routed = 0
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { task, agent, score, via } of plan.decisions) {
+    const allowed = stillAllowed(db, task.id, { wip: false })
+    if (!allowed.ok) {
+      if (allowed.stop) break
+      continue
+    }
     const changed = db.prepare('UPDATE tasks SET status = ?, assigned_to = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = ? AND assigned_to IS NULL')
-      .run('assigned', best.name, now, task.id, task.workspace_id, 'inbox').changes
+      .run('assigned', agent.name, now, task.id, task.workspace_id, 'inbox').changes
     if (!changed) continue
 
     db_helpers.logActivity('task_auto_routed', 'task', task.id, 'scheduler',
-      `Auto-assigned "${task.title}" to ${best.name} (${best.role}, score: ${scored[0].score})`,
-      { agent: best.name, role: best.role, score: scored[0].score },
+      via === 'owner'
+        ? `Auto-assigned "${task.title}" to ${agent.name}, the owner approved by the morning meeting`
+        : `Auto-assigned "${task.title}" to ${agent.name} (${agent.role}, score: ${score})`,
+      { agent: agent.name, role: agent.role, score, via },
       task.workspace_id)
 
-    eventBus.broadcast('task.status_changed', { id: task.id, status: 'assigned', previous_status: 'inbox', assigned_to: best.name })
+    eventBus.broadcast('task.status_changed', { id: task.id, status: 'assigned', previous_status: 'inbox', assigned_to: agent.name })
     syncAndEscalateIfFailed(task as any, 'assigned')
     routed++
   }
@@ -1193,7 +1417,94 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
   return {
     ok: true,
     message: routed > 0
-      ? `Auto-routed ${routed}/${inboxTasks.length} inbox task(s)`
-      : `${inboxTasks.length} inbox task(s), no suitable agents found`,
+      ? `Auto-routed ${routed}/${inboxCount} inbox task(s)`
+      : `${inboxCount} inbox task(s), no suitable agents found`,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plan mode: what the next tick would do, without doing it
+// ---------------------------------------------------------------------------
+
+export interface DispatchPlan {
+  generated_at: number
+  dispatch_enabled: boolean
+  scope: DispatchScopeContext['scope']
+  scope_setting: string | null
+  approved: {
+    state: DispatchScopeContext['approved']['state']
+    date: string | null
+    approved_at: number | null
+    age_hours: number | null
+    max_age_hours: number
+    problem: string | null
+    outcomes: Array<{ task_id: number; owner: string; outcome: string }>
+    children: Array<{ task_id: number; outcome_task_id: number }>
+  }
+  held_reason: DispatchScopeContext['held_reason']
+  /** The activity line a held tick writes, and whether the next tick would write it (rate limit). */
+  held_activity: { type: string; description: string; due: boolean } | null
+  wip: { in_progress: number; max: number | null; free: number | null }
+  route: Array<{ id: number; title: string; priority: string; to: string; via: RouteDecision['via'] }>
+  dispatch: Array<{ id: number; title: string; priority: string; assigned_to: string; via: string }>
+  not_selected: DispatchSkip[]
+  next_tick: { runs: boolean; would_route: number; would_dispatch: number }
+}
+
+/** Read-only: no row, setting or activity is written. */
+export function planDispatch(db: ReturnType<typeof getDatabase> = getDatabase()): DispatchPlan {
+  const ctx = resolveDispatchScope(db)
+  const routing = planInboxRouting(db, ctx)
+  const dispatch = selectAssignedForDispatch(db, ctx, routing.decisions.map(d => ({ id: d.task.id, agent: d.agent.name })))
+
+  const notSelected: DispatchSkip[] = [...routing.skipped, ...dispatch.skipped]
+  const accounted = new Set<number>([
+    ...routing.decisions.map(d => d.task.id),
+    ...dispatch.tasks.map(t => t.id),
+    ...notSelected.map(s => s.id),
+  ])
+  if (ctx.eligible_ids) {
+    for (const id of ctx.eligible_ids) {
+      if (accounted.has(id)) continue
+      const row = db.prepare(`
+        SELECT t.status, t.assigned_to, a.name AS agent
+        FROM tasks t LEFT JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
+        WHERE t.id = ?`).get(id) as { status: string; assigned_to: string | null; agent: string | null } | undefined
+      if (!row) notSelected.push({ id, reason: 'task_not_found' })
+      else if (isManagedComputeTask((db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(id) as { metadata: string | null }).metadata)) notSelected.push({ id, reason: 'managed_compute' })
+      else if (row.status === 'inbox' && row.assigned_to) notSelected.push({ id, reason: 'inbox_already_assigned', detail: `assigned to ${row.assigned_to}; set status=assigned for MC dispatch` })
+      else if (row.status === 'assigned' && !row.agent) notSelected.push({ id, reason: 'assignee_not_an_mc_agent', detail: row.assigned_to ?? '' })
+      else if (row.status === 'inbox') notSelected.push({ id, reason: 'route_batch_limit' })
+      else if (row.status !== 'assigned') notSelected.push({ id, reason: `status_${row.status}` })
+      else notSelected.push({ id, reason: 'not_selected' })
+    }
+  }
+
+  const runs = ctx.enabled && !ctx.held_reason
+  const list = ctx.approved.list
+  return {
+    generated_at: ctx.now,
+    dispatch_enabled: ctx.enabled,
+    scope: ctx.scope,
+    scope_setting: ctx.scope_setting,
+    approved: {
+      state: ctx.approved.state,
+      date: list?.date ?? null,
+      approved_at: list?.approved_at ?? null,
+      age_hours: ctx.approved.age_hours,
+      max_age_hours: APPROVED_MAX_AGE_HOURS,
+      problem: ctx.approved.problem,
+      outcomes: list?.outcomes ?? [],
+      children: [...ctx.children].map(([task_id, outcome_task_id]) => ({ task_id, outcome_task_id })),
+    },
+    held_reason: ctx.held_reason,
+    held_activity: ctx.held_reason
+      ? { type: DISPATCH_HELD_ACTIVITY, description: describeHeld(ctx), due: ctx.enabled && isHeldActivityDue(db, ctx.held_reason, ctx.now) }
+      : null,
+    wip: dispatch.wip,
+    route: routing.decisions.map(d => ({ id: d.task.id, title: d.task.title, priority: d.task.priority, to: d.agent.name, via: d.via })),
+    dispatch: dispatch.tasks.map(t => ({ id: t.id, title: t.title, priority: t.priority, assigned_to: t.assigned_to, via: t.via ?? 'assigned' })),
+    not_selected: notSelected,
+    next_tick: { runs, would_route: runs ? routing.decisions.length : 0, would_dispatch: runs ? dispatch.tasks.length : 0 },
   }
 }

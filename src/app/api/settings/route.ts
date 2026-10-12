@@ -43,6 +43,9 @@ const settingDefinitions: Record<string, { category: string; description: string
   'general.backup_retention_count': { category: 'general', description: 'Number of backup files to keep', default: '10' },
   'general.claim_lease_sweep': { category: 'general', description: 'Release task claims that nobody has touched for the claim lease (see general.claim_lease_hours)', default: 'false' },
   'general.claim_lease_hours': { category: 'general', description: 'Hours without task activity after which a claim is released (1-2160)', default: '72' },
+  'general.task_dispatch': { category: 'general', description: 'Factory kill switch: Mission Control dispatches tasks only when this is "true" (absent = off)', default: 'false' },
+  'general.task_dispatch_scope': { category: 'general', description: 'What dispatch may take: approved_only (only the morning meeting\'s approved list, max 3 in progress) or all (whole queue, legacy). Absent = approved_only', default: 'approved_only' },
+  'general.task_dispatch_approved': { category: 'general', description: 'Approved outcomes from the morning meeting (JSON, written by POST /api/tasks/dispatch-approved; older than 36 h = nothing dispatches)', default: '' },
   'intake.wip_caps': { category: 'general', description: 'JSON per-source cap on open tasks, e.g. {"feature-audit":15,"seo-radar":{"cap":5,"on_cap":"reject"},"deep-verify":0}. Empty = defaults. 0 = unlimited.', default: '' },
 
   // Subscription overrides
