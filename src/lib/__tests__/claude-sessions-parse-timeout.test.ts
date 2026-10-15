@@ -75,11 +75,19 @@ describe('scanClaudeSessions with a file that never finishes', () => {
     )
   })
 
-  it('does not time out a file that is merely slow to start: the timer is per file and cleared on success', async () => {
-    const scan = scanClaudeSessions()
-    const sessions = await scan
-    await vi.advanceTimersByTimeAsync(60_000)
+  it('leaves no timer behind: the per-file deadline is cleared when the file finishes', async () => {
+    const sessions = await scanClaudeSessions()
     expect(sessions).toHaveLength(2)
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(60_000)
     expect(mock.warn).not.toHaveBeenCalled()
+  })
+
+  it('the hung file does not leave a timer behind either, once it has timed out', async () => {
+    mock.hangOn = 'a-hangs.jsonl'
+    const scan = scanClaudeSessions()
+    await vi.advanceTimersByTimeAsync(31_000)
+    await scan
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

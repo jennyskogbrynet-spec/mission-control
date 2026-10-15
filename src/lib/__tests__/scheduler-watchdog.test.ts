@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -24,6 +24,8 @@ const mock = vi.hoisted(() => ({
   loggerInfo: vi.fn(),
   syncClaudeSessions: vi.fn(),
   syncAgentsFromConfig: vi.fn(),
+  autoRoute: vi.fn(),
+  dispatch: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: () => mock.db, logAuditEvent: mock.audit }))
@@ -51,9 +53,9 @@ vi.mock('@/lib/skill-sync', () => ({ syncSkillsFromDisk: vi.fn().mockResolvedVal
 vi.mock('@/lib/local-agent-sync', () => ({ syncLocalAgents: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }) }))
 vi.mock('@/lib/recurring-tasks', () => ({ spawnRecurringTasks: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }) }))
 vi.mock('@/lib/task-dispatch', () => ({
-  dispatchAssignedTasks: vi.fn().mockResolvedValue({ ok: true, message: 'No tasks' }),
+  dispatchAssignedTasks: mock.dispatch,
   requeueStaleTasks: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }),
-  autoRouteInboxTasks: vi.fn().mockResolvedValue({ ok: true, message: 'No tasks' }),
+  autoRouteInboxTasks: mock.autoRoute,
 }))
 
 import { config } from '@/lib/config'
@@ -94,6 +96,10 @@ function plantBackup(name: string, ageMs: number) {
   return file
 }
 
+const YESTERDAYS_BACKUP = 'mc-backup-2026-10-13_03-00-32.db'
+/** A 24 h old backup: inside the 25 h catch-up age, so the 03:00 UTC slot itself is what starts the next run. */
+const plantYesterdaysBackup = () => plantBackup(YESTERDAYS_BACKUP, 24 * HOUR)
+
 const finishedBackups = () => (existsSync(BACKUP_DIR) ? readdirSync(BACKUP_DIR).filter(f => /^mc-backup-.*\.db$/.test(f)) : [])
 const task = (id: string) => getSchedulerStatus().find(t => t.id === id)!
 const auditCalls = (action: string) => mock.audit.mock.calls.map(c => c[0]).filter(c => c.action === action)
@@ -110,6 +116,8 @@ beforeEach(() => {
   mock.backup.mockImplementation(backupWritesFile)
   mock.syncClaudeSessions.mockResolvedValue({ ok: true, message: 'Scanned' })
   mock.syncAgentsFromConfig.mockResolvedValue({ created: 0, updated: 0, synced: 0 })
+  mock.autoRoute.mockResolvedValue({ ok: true, message: 'No tasks' })
+  mock.dispatch.mockResolvedValue({ ok: true, message: 'No tasks' })
 })
 afterEach(() => {
   stopScheduler()
@@ -121,6 +129,7 @@ afterEach(() => {
 describe('a backup that never finishes (the 14 Oct failure)', () => {
   it('is released by the watchdog, audited as auto_backup_failed with its reason, and cancelled', async () => {
     vi.setSystemTime(BEFORE_SLOT)
+    plantYesterdaysBackup()
     mock.backup.mockImplementation(() => new Promise(() => {}))
     initScheduler()
 
@@ -148,16 +157,17 @@ describe('a backup that never finishes (the 14 Oct failure)', () => {
 
   it('retries after the backoff instead of waiting a day, and the retry succeeds', async () => {
     vi.setSystemTime(BEFORE_SLOT)
+    plantYesterdaysBackup()
     mock.backup.mockImplementationOnce(() => new Promise(() => {}))
     initScheduler()
     await vi.advanceTimersByTimeAsync(18 * MIN)
     expect(task('auto_backup').lastResult!.ok).toBe(false)
-    expect(finishedBackups()).toEqual([])
+    expect(finishedBackups()).toEqual([YESTERDAYS_BACKUP])
 
     await vi.advanceTimersByTimeAsync(32 * MIN)
     expect(mock.backup).toHaveBeenCalledTimes(2)
     expect(task('auto_backup').lastResult).toMatchObject({ ok: true })
-    expect(finishedBackups()).toHaveLength(1)
+    expect(finishedBackups()).toHaveLength(2)
     expect(auditCalls('auto_backup')).toHaveLength(1)
     // After success the schedule is back on the 03:00 UTC slot, not a day from the retry.
     expect(task('auto_backup').nextRun).toBe(Date.UTC(2026, 9, 15, 3, 0, 0))
@@ -165,22 +175,31 @@ describe('a backup that never finishes (the 14 Oct failure)', () => {
 
   it('ignores a late settle: the abandoned call cannot overwrite the recorded timeout', async () => {
     vi.setSystemTime(BEFORE_SLOT)
-    let settle: (v: unknown) => void = () => {}
-    mock.backup.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+    plantYesterdaysBackup()
+    // A late settle that has really written its file: only the abort guards in runBackup stand
+    // between it and a rename plus an `auto_backup` audit row for a run the watchdog already failed.
+    let settle: () => void = () => {}
+    mock.backup.mockImplementationOnce((dest: string) => new Promise(resolve => {
+      settle = () => { writeFileSync(dest, 'x'.repeat(2048)); resolve({ totalPages: 1, remainingPages: 0 }) }
+    }))
     initScheduler()
     await vi.advanceTimersByTimeAsync(18 * MIN)
     expect(task('auto_backup').lastResult!.message).toMatch(/timed out/)
 
-    settle({ totalPages: 1, remainingPages: 0 })
+    settle()
     await vi.advanceTimersByTimeAsync(0)
     expect(task('auto_backup').lastResult!.message).toMatch(/timed out/)
     expect(auditCalls('auto_backup')).toHaveLength(0)
+    expect(auditCalls('auto_backup_failed')).toHaveLength(1) // the timeout, reported once; the late run says nothing
+    expect(finishedBackups()).toEqual([YESTERDAYS_BACKUP])
+    expect(readdirSync(BACKUP_DIR).filter(f => f.endsWith('.partial'))).toEqual([])
   })
 })
 
 describe('a backup that throws (the case that used to be silent)', () => {
   it('logs and audits every failure with the error message, and leaves no partial file behind', async () => {
     vi.setSystemTime(BEFORE_SLOT)
+    plantYesterdaysBackup()
     mock.backup.mockImplementationOnce(async (dest: string) => {
       writeFileSync(dest, 'half a database')
       throw new Error('SQLITE_FULL: database or disk is full')
@@ -196,7 +215,7 @@ describe('a backup that throws (the case that used to be silent)', () => {
       expect.stringContaining('Backup failed'),
     )
     expect(task('auto_backup').lastResult).toMatchObject({ ok: false, message: 'Backup failed: SQLITE_FULL: database or disk is full' })
-    expect(readdirSync(BACKUP_DIR)).toEqual([])
+    expect(readdirSync(BACKUP_DIR)).toEqual([YESTERDAYS_BACKUP])
   })
 
   it('failures of a manual trigger are audited too, once', async () => {
@@ -208,6 +227,7 @@ describe('a backup that throws (the case that used to be silent)', () => {
 
   it('a partial file from a run in progress is never taken for a finished backup', async () => {
     vi.setSystemTime(BEFORE_SLOT)
+    plantYesterdaysBackup()
     let seenWhileWriting: string[] | null = null
     mock.backup.mockImplementationOnce(async (dest: string) => {
       writeFileSync(dest, 'x'.repeat(100))
@@ -216,8 +236,8 @@ describe('a backup that throws (the case that used to be silent)', () => {
     })
     initScheduler()
     await vi.advanceTimersByTimeAsync(2 * MIN)
-    expect(seenWhileWriting).toEqual([]) // still being written: not a candidate for freshness or pruning
-    expect(finishedBackups()).toHaveLength(1)
+    expect(seenWhileWriting).toEqual([YESTERDAYS_BACKUP]) // still being written: not a candidate for freshness or pruning
+    expect(finishedBackups()).toHaveLength(2)
     expect(readdirSync(BACKUP_DIR).filter(f => f.endsWith('.partial'))).toEqual([])
   })
 })
@@ -282,7 +302,7 @@ describe('due-ness survives a restart', () => {
 })
 
 describe('backup freshness is checked without auto_cleanup', () => {
-  it('raises backup_stale from the housekeeping loop (auto_cleanup is off by default), once an hour at most', async () => {
+  it('raises backup_stale from the housekeeping loop (auto_cleanup is off by default); switched off on purpose it is a daily reminder', async () => {
     setSetting('general.auto_backup', 'false')
     plantBackup('mc-backup-2026-10-12_03-00-32.db', 40 * HOUR)
     initScheduler()
@@ -293,10 +313,21 @@ describe('backup freshness is checked without auto_cleanup', () => {
     expect(auditCalls('backup_stale')[0].detail.message).toMatch(/Newest automatic backup is 40h old/)
     expect(mock.broadcast).toHaveBeenCalledWith('backup.stale', expect.objectContaining({ detail: expect.any(String) }))
 
-    await vi.advanceTimersByTimeAsync(40 * MIN)
-    expect(auditCalls('backup_stale')).toHaveLength(1)
-    await vi.advanceTimersByTimeAsync(30 * MIN) // past the hour: it says so again
+    await vi.advanceTimersByTimeAsync(2 * HOUR)
+    expect(auditCalls('backup_stale')).toHaveLength(1) // switched off on purpose: a daily reminder, not hourly
+    await vi.advanceTimersByTimeAsync(23 * HOUR)
     expect(auditCalls('backup_stale')).toHaveLength(2)
+  })
+
+  it('with auto backup on and every attempt failing, the alert repeats hourly', async () => {
+    plantBackup('mc-backup-2026-10-12_03-00-32.db', 40 * HOUR)
+    mock.backup.mockRejectedValue(new Error('disk I/O error'))
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(46 * MIN)
+    expect(auditCalls('backup_stale')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(30 * MIN) // past the hour
+    expect(auditCalls('backup_stale')).toHaveLength(2)
+    expect(auditCalls('auto_backup_failed').length).toBeGreaterThanOrEqual(2)
   })
 
   it('stays quiet when the newest backup is fresh', async () => {
@@ -362,5 +393,148 @@ describe('the other scheduled tasks are covered by the same watchdog and logging
     expect(auditCalls('scheduler_task_failed')).toHaveLength(0)
     expect(auditCalls('auto_backup_failed')).toHaveLength(0)
     expect(getSchedulerStatus().every(t => !t.consecutiveFailures)).toBe(true)
+  })
+})
+
+describe('findings of the independent review of PR 1', () => {
+  it('dispatch is never released: a healthy 35 min run is reported as stalled once and not started a second time', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    setSetting('general.task_dispatch', 'true')
+    mock.dispatch.mockImplementationOnce(
+      () => new Promise(resolve => setTimeout(() => resolve({ ok: true, message: 'Dispatched 1 task' }), 35 * MIN)),
+    )
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(33 * MIN)
+    expect(mock.dispatch).toHaveBeenCalledTimes(1)
+    expect(task('task_dispatch').running).toBe(true)
+    const stalled = auditCalls('scheduler_task_stalled').filter(c => c.detail.task === 'task_dispatch')
+    expect(stalled).toHaveLength(1)
+    expect(stalled[0].detail.minutes).toBe(30)
+
+    await vi.advanceTimersByTimeAsync(5 * MIN) // the run finishes at ~36 min
+    expect(task('task_dispatch').lastResult).toMatchObject({ ok: true })
+    expect(auditCalls('scheduler_task_failed').filter(c => c.detail.task === 'task_dispatch')).toHaveLength(0)
+    expect(auditCalls('scheduler_task_stalled')).toHaveLength(1)
+  })
+
+  it('one unreadable entry in the backup directory does not read as "no backup": no catch-up, no false alert', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    symlinkSync('/nonexistent/target.db', join(BACKUP_DIR, 'mc-backup-dangling.db'))
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * HOUR)
+    expect(mock.backup).not.toHaveBeenCalled()
+    expect(auditCalls('backup_stale')).toHaveLength(0)
+  })
+
+  it('pruning goes entry by entry: an unreadable entry does not stop older backups being removed', async () => {
+    setSetting('general.backup_retention_count', '2')
+    for (const [hours, name] of [[30, 'a'], [29, 'b'], [28, 'c'], [27, 'd']] as const) {
+      plantBackup(`mc-backup-2026-10-1${hours % 10}_0${name === 'a' ? 1 : 2}-00-00.db`, hours * HOUR)
+    }
+    symlinkSync('/nonexistent/target.db', join(BACKUP_DIR, 'mc-backup-dangling.db'))
+    initScheduler() // newest is 27 h old: overdue, so a backup runs and then prunes
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+    const kept = finishedBackups().filter(f => f !== 'mc-backup-dangling.db')
+    expect(kept).toHaveLength(2) // the new one and the 27 h old one
+    expect(kept).toContain('mc-backup-2026-10-17_02-00-00.db')
+  })
+
+  it('a backup this process just finished is not repeated by the catch-up when the directory scan then shows nothing', async () => {
+    initScheduler() // no backup at all: catch-up runs one
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+    rmSync(BACKUP_DIR, { recursive: true, force: true })
+    await vi.advanceTimersByTimeAsync(30 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes what a run that died left behind and keeps a copy that is in progress', async () => {
+    const dead = plantBackup('mc-backup-2026-10-13_03-00-32.db.partial', 3 * HOUR)
+    const deadJournal = plantBackup('mc-backup-2026-10-13_03-00-32.db.partial-journal', 3 * HOUR)
+    const live = plantBackup('mc-backup-2026-10-14_07-59-30.db.partial', 2 * MIN)
+    plantBackup('mc-backup-2026-10-12_03-00-32.db', 30 * HOUR) // overdue: a backup runs and cleans up first
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+    expect(existsSync(dead)).toBe(false)
+    expect(existsSync(deadJournal)).toBe(false)
+    expect(existsSync(live)).toBe(true)
+  })
+
+  it('two backups started in the same second (a manual trigger beside the scheduled one) get different paths', async () => {
+    const paths: string[] = []
+    mock.backup.mockImplementation(async (dest: string) => {
+      paths.push(dest)
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      writeFileSync(dest, 'x'.repeat(2048))
+      return { totalPages: 1, remainingPages: 0 }
+    })
+    const both = Promise.all([triggerTask('auto_backup'), triggerTask('auto_backup')])
+    await vi.advanceTimersByTimeAsync(1500)
+    const results = await both
+    expect(results.map(r => r.ok)).toEqual([true, true])
+    expect(new Set(paths).size).toBe(2)
+    expect(finishedBackups()).toHaveLength(2)
+  })
+
+  it('an afternoon catch-up is followed by the coming 03:00 UTC slot, not the one after (the schedule does not walk)', async () => {
+    vi.setSystemTime(Date.UTC(2026, 9, 14, 16, 0, 0))
+    plantBackup('mc-backup-2026-10-12_03-00-32.db', 40 * HOUR)
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+    expect(task('auto_backup').nextRun).toBe(Date.UTC(2026, 9, 15, 3, 0, 0))
+  })
+
+  it('a catch-up in the hour before the slot is not repeated at the slot', async () => {
+    vi.setSystemTime(Date.UTC(2026, 9, 14, 2, 20, 0))
+    plantBackup('mc-backup-2026-10-12_03-00-32.db', 40 * HOUR)
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(1)
+    expect(task('auto_backup').nextRun).toBe(Date.UTC(2026, 9, 15, 3, 0, 0))
+  })
+
+  it('a task that hangs for good backs off, stops at three abandoned calls, and runs again once one settles', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    const settlers: Array<(v: unknown) => void> = []
+    mock.syncClaudeSessions.mockImplementation(() => new Promise(resolve => { settlers.push(resolve) }))
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(6 * HOUR)
+    expect(mock.syncClaudeSessions).toHaveBeenCalledTimes(3) // 1st at +1 min, then +5, +10 min after each timeout, then the cap
+    expect(task('claude_session_scan')).toMatchObject({ running: false, abandonedRuns: 3, lastResult: expect.objectContaining({ ok: false }) })
+    expect(auditCalls('scheduler_task_failed').filter(c => c.detail.task === 'claude_session_scan')[0].detail.abandoned_runs).toBe(1)
+
+    settlers[0]({ ok: true, message: 'very late' })
+    mock.syncClaudeSessions.mockResolvedValue({ ok: true, message: 'Scanned' })
+    await vi.advanceTimersByTimeAsync(2 * MIN)
+    expect(mock.syncClaudeSessions.mock.calls.length).toBeGreaterThanOrEqual(4) // running again, at the normal cadence
+    expect(task('claude_session_scan')).toMatchObject({ abandonedRuns: 2, consecutiveFailures: 0, lastResult: expect.objectContaining({ ok: true }) })
+  })
+
+  it('after a timeout the task waits 5 minutes before its next run, not one interval', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    mock.syncClaudeSessions.mockImplementation(() => new Promise(() => {}))
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(14 * MIN) // 1st run at +1 min, released at +11 min
+    expect(mock.syncClaudeSessions).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(4 * MIN) // +16 min: the backoff is over
+    expect(mock.syncClaudeSessions).toHaveBeenCalledTimes(2)
+  })
+
+  it('a timeout names the stage of the scheduled run, also after a manual trigger ran', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    initScheduler()
+    await triggerTask('auto_backup')
+    expect(getSchedulerStatus().find(t => t.id === 'auto_backup')!.running).toBe(false)
+    // A timeout names the stage of the scheduled run, never a leftover of the manual one.
+    mock.backup.mockImplementation(() => new Promise(() => {}))
+    vi.setSystemTime(BEFORE_SLOT)
+    stopScheduler()
+    plantYesterdaysBackup()
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(18 * MIN)
+    expect(task('auto_backup').lastResult!.message).toMatch(/stuck in: db\.backup/)
   })
 })
