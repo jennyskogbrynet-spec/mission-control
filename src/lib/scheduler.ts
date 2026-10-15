@@ -2,7 +2,7 @@ import { getDatabase, logAuditEvent } from './db'
 import { syncAgentsFromConfig } from './agent-sync'
 import { config, ensureDirExists } from './config'
 import { join, dirname } from 'path'
-import { readdirSync, statSync, unlinkSync } from 'fs'
+import { readdirSync, renameSync, statSync, unlinkSync } from 'fs'
 import { logger } from './logger'
 import { processWebhookRetries } from './webhooks'
 import { syncClaudeSessions } from './claude-sessions'
@@ -16,6 +16,50 @@ import { CLAIM_LEASE_SWEEP_SETTING, readActiveNativeWorkerTaskIds, readClaimLeas
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
+const MINUTE_MS = 60 * 1000
+const HOUR_MS = 60 * MINUTE_MS
+
+/** The daily backup's slot, in UTC. */
+const BACKUP_SLOT_HOUR_UTC = 3
+/** After a failed or timed-out backup, try again this much later (not a day later). */
+const BACKUP_RETRY_MS = 30 * MINUTE_MS
+/** A backup this old means a daily slot was missed; run one now (24 h cadence + 1 h grace, so the normal run never trips it). */
+const BACKUP_CATCHUP_AGE_MS = 25 * HOUR_MS
+/** The freshness alert fires later than the catch-up, so a catch-up that works never raises it. */
+const BACKUP_STALE_ALERT_AGE_HOURS = 26
+/** First catch-up run after a start that finds the newest backup too old. */
+const BACKUP_STARTUP_DELAY_MS = 30 * 1000
+/** A backup is followed by the next 03:00 UTC slot at least this far away, so a catch-up just before 03:00 is not repeated minutes later. */
+const BACKUP_MIN_GAP_MS = 12 * HOUR_MS
+/** Housekeeping (catch-up and freshness) runs at most this often, from the tick, independent of any task's switch. */
+const HOUSEKEEPING_INTERVAL_MS = 5 * MINUTE_MS
+/** A stale-backup alert, and a repeated failure of one task, are logged and audited at most this often. */
+const REPORT_REPEAT_MS = HOUR_MS
+
+/**
+ * One awaited call that never settles used to leave `running: true` on its task for good (MC 1728):
+ * every later tick skipped the task and nothing was logged. A run that outlives its limit is
+ * released, recorded as a failure with the call it was stuck in, and tried again.
+ */
+const DEFAULT_TASK_TIMEOUT_MS = 10 * MINUTE_MS
+const TASK_TIMEOUT_MS: Record<string, number> = {
+  auto_backup: 15 * MINUTE_MS,
+  // Dispatch invokes agents and can be slow on purpose; a release here only frees the flag.
+  task_dispatch: 30 * MINUTE_MS,
+}
+
+class TaskTimeoutError extends Error {
+  constructor(taskId: string, timeoutMs: number, stage?: string) {
+    super(`${taskId} timed out after ${Math.round(timeoutMs / MINUTE_MS)} min${stage ? ` (stuck in: ${stage})` : ''}`)
+    this.name = 'TaskTimeoutError'
+  }
+}
+
+function setStage(taskId: string, stage: string) {
+  const task = tasks.get(taskId)
+  if (task) task.stage = stage
+}
+
 interface ScheduledTask {
   name: string
   intervalMs: number
@@ -24,6 +68,14 @@ interface ScheduledTask {
   enabled: boolean
   running: boolean
   lastResult?: { ok: boolean; message: string; timestamp: number }
+  /** When the current run started; null/undefined while idle. */
+  runningSince?: number | null
+  /** Runs in a row that failed, threw or timed out. Reset by the next success. */
+  consecutiveFailures?: number
+  /** When a failure of this task was last logged + audited (they are throttled to one per hour). */
+  lastFailureReportAt?: number | null
+  /** Where the current run says it is, so a timeout can name the call it was stuck in. */
+  stage?: string
 }
 
 const tasks: Map<string, ScheduledTask> = new Map()
@@ -80,18 +132,75 @@ async function runClaimLeaseSweep(): Promise<{ ok: boolean; message: string }> {
   }
 }
 
-/** Run a database backup */
-async function runBackup(): Promise<{ ok: boolean; message: string }> {
-  ensureDirExists(BACKUP_DIR)
+/** Finished backups only: `mc-backup-*.db`. A run in progress writes `….db.partial` and renames when done. */
+function isFinishedBackup(name: string): boolean {
+  return name.startsWith('mc-backup-') && name.endsWith('.db')
+}
 
+/** mtime of the newest finished backup, or 0 when there is none (or the directory cannot be read). */
+function newestBackupMtimeMs(): number {
+  let newest = 0
+  try {
+    for (const f of readdirSync(BACKUP_DIR)) {
+      if (!isFinishedBackup(f)) continue
+      const mtime = statSync(join(BACKUP_DIR, f)).mtimeMs
+      if (mtime > newest) newest = mtime
+    }
+  } catch {
+    return 0
+  }
+  return newest
+}
+
+/** Age of the newest finished backup; Infinity when there is none. */
+function newestBackupAgeMs(nowMs: number): number {
+  const newest = newestBackupMtimeMs()
+  return newest === 0 ? Infinity : nowMs - newest
+}
+
+/** The next 03:00 UTC slot after `nowMs`, skipping one when it is under 12 h away (a catch-up just before it). */
+function nextBackupSlot(nowMs: number): number {
+  const slot = new Date(nowMs)
+  slot.setUTCHours(BACKUP_SLOT_HOUR_UTC, 0, 0, 0)
+  if (slot.getTime() <= nowMs) slot.setUTCDate(slot.getUTCDate() + 1)
+  if (slot.getTime() - nowMs < BACKUP_MIN_GAP_MS) slot.setUTCDate(slot.getUTCDate() + 1)
+  return slot.getTime()
+}
+
+function removeQuietly(path: string) {
+  try { unlinkSync(path) } catch { /* not there, or already gone */ }
+}
+
+/**
+ * Run a database backup. It writes `<name>.db.partial` and renames it when the copy is complete,
+ * so a run in progress or a failed one is never taken for a finished backup (freshness, pruning).
+ * Every failure is logged and audited as `auto_backup_failed` with the error's own message.
+ * `signal` is the scheduler watchdog's: once aborted, better-sqlite3 is told to stop at its next
+ * progress callback and nothing more is written, logged or renamed by this (abandoned) run.
+ */
+async function runBackup(signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
   const backupPath = join(BACKUP_DIR, `mc-backup-${timestamp}.db`)
+  const partialPath = `${backupPath}.partial`
 
   try {
+    setStage('auto_backup', 'preparing backup directory')
+    ensureDirExists(BACKUP_DIR)
     const db = getDatabase()
-    await db.backup(backupPath)
 
-    const stat = statSync(backupPath)
+    setStage('auto_backup', 'db.backup')
+    await db.backup(partialPath, {
+      progress: () => {
+        if (signal?.aborted) throw new Error('Backup cancelled: the scheduler watchdog timed out this run')
+        return 100 // pages per step: better-sqlite3's own default, restated because the callback must return a number
+      },
+    })
+    if (signal?.aborted) throw new Error('Backup cancelled: the scheduler watchdog timed out this run')
+
+    setStage('auto_backup', 'finalizing backup file')
+    const stat = statSync(partialPath)
+    if (stat.size === 0) throw new Error('Backup produced an empty file')
+    renameSync(partialPath, backupPath)
     logAuditEvent({
       action: 'auto_backup',
       actor: 'scheduler',
@@ -99,10 +208,11 @@ async function runBackup(): Promise<{ ok: boolean; message: string }> {
     })
 
     // Prune old backups
+    setStage('auto_backup', 'pruning old backups')
     const maxBackups = getSettingNumber('general.backup_retention_count', 10)
     try {
       const files = readdirSync(BACKUP_DIR)
-        .filter(f => f.startsWith('mc-backup-') && f.endsWith('.db'))
+        .filter(isFinishedBackup)
         .map(f => ({ name: f, mtime: statSync(join(BACKUP_DIR, f)).mtimeMs }))
         .sort((a, b) => b.mtime - a.mtime)
 
@@ -116,7 +226,15 @@ async function runBackup(): Promise<{ ok: boolean; message: string }> {
     const sizeKB = Math.round(stat.size / 1024)
     return { ok: true, message: `Backup created (${sizeKB}KB)` }
   } catch (err: any) {
-    return { ok: false, message: `Backup failed: ${err.message}` }
+    removeQuietly(partialPath)
+    const message = err?.message ?? String(err)
+    if (signal?.aborted) {
+      // The watchdog already recorded this run's timeout; do not report it a second time.
+      return { ok: false, message: `Backup cancelled: ${message}` }
+    }
+    logger.error({ err, path: backupPath }, `Backup failed: ${message}`)
+    logAuditEvent({ action: 'auto_backup_failed', actor: 'scheduler', detail: { message, path: backupPath } })
+    return { ok: false, message: `Backup failed: ${message}` }
   }
 }
 
@@ -128,25 +246,53 @@ async function runBackup(): Promise<{ ok: boolean; message: string }> {
  * silent regression can never go unnoticed again.
  */
 function checkBackupFreshness(): void {
-  const maxAgeHours = 26
-  let newestMs = 0
-  try {
-    for (const f of readdirSync(BACKUP_DIR)) {
-      if (!f.startsWith('mc-backup-') || !f.endsWith('.db')) continue
-      const mtime = statSync(join(BACKUP_DIR, f)).mtimeMs
-      if (mtime > newestMs) newestMs = mtime
-    }
-  } catch {
-    newestMs = 0
-  }
-  const ageHours = newestMs === 0 ? Infinity : (Date.now() - newestMs) / 3_600_000
+  const maxAgeHours = BACKUP_STALE_ALERT_AGE_HOURS
+  const nowMs = Date.now()
+  const newestMs = newestBackupMtimeMs()
+  const ageHours = newestMs === 0 ? Infinity : (nowMs - newestMs) / 3_600_000
   if (ageHours <= maxAgeHours) return
+  // Called every few minutes from the tick: say it once, then again each hour while it stays true.
+  if (lastStaleAlertAt !== null && nowMs - lastStaleAlertAt < REPORT_REPEAT_MS) return
+  lastStaleAlertAt = nowMs
   const detail = newestMs === 0
     ? 'No automatic backup (mc-backup-*.db) exists at all'
     : `Newest automatic backup is ${Math.round(ageHours)}h old (threshold ${maxAgeHours}h)`
   logger.error({ backupDir: BACKUP_DIR, ageHours }, `Backup freshness alert: ${detail}`)
   logAuditEvent({ action: 'backup_stale', actor: 'scheduler', detail: { message: detail } })
   eventBus.broadcast('backup.stale', { detail, newest_backup_ms: newestMs || null })
+}
+
+let lastStaleAlertAt: number | null = null
+let lastHousekeepingAt = 0
+
+/**
+ * Backup housekeeping, run from the tick every five minutes whatever any task's switch says
+ * (the freshness check used to live only inside auto_cleanup, which is off by default, so 0
+ * `backup_stale` rows ever existed while the backup was hanging). Two things:
+ *  - catch up: when auto backup is on and the newest backup is older than 25 h, a daily slot
+ *    was missed (restart, hang, failed run), so make the backup due now. A failed run's
+ *    30-minute backoff is respected: only a far-away `nextRun` is pulled forward.
+ *  - alert: `checkBackupFreshness()`.
+ * It never throws: a broken housekeeping must not stop the tick.
+ */
+function runBackupHousekeeping(nowMs: number): void {
+  if (nowMs - lastHousekeepingAt < HOUSEKEEPING_INTERVAL_MS) return
+  lastHousekeepingAt = nowMs
+  try {
+    const backup = tasks.get('auto_backup')
+    if (
+      backup && !backup.running &&
+      backup.nextRun - nowMs > BACKUP_RETRY_MS &&
+      isSettingEnabled('general.auto_backup', true) &&
+      newestBackupAgeMs(nowMs) > BACKUP_CATCHUP_AGE_MS
+    ) {
+      logger.warn({ backupDir: BACKUP_DIR }, 'Newest backup is older than 25h: running the missed backup now')
+      backup.nextRun = nowMs
+    }
+    checkBackupFreshness()
+  } catch (err) {
+    logger.error({ err }, 'Backup housekeeping failed')
+  }
 }
 
 async function runCleanup(): Promise<{ ok: boolean; message: string }> {
@@ -344,15 +490,20 @@ export function initScheduler() {
 
   // Register tasks
   const now = Date.now()
+  lastStaleAlertAt = null
+  lastHousekeepingAt = 0
   // Stagger the initial runs: backup at ~3 AM, cleanup at ~4 AM (relative to process start)
-  const msUntilNextBackup = getNextDailyMs(3)
+  const msUntilNextBackup = getNextDailyMs(BACKUP_SLOT_HOUR_UTC)
   const msUntilNextCleanup = getNextDailyMs(4)
+  // Due-ness is not kept in memory only: a start that finds the newest backup older than a day
+  // (no backup at all included) runs one right away instead of waiting for the next 03:00 UTC.
+  const backupOverdueAtStart = isSettingEnabled('general.auto_backup', true) && newestBackupAgeMs(now) > BACKUP_CATCHUP_AGE_MS
 
   tasks.set('auto_backup', {
     name: 'Auto Backup',
     intervalMs: DAILY_MS,
     lastRun: null,
-    nextRun: now + msUntilNextBackup,
+    nextRun: backupOverdueAtStart ? now + BACKUP_STARTUP_DELAY_MS : now + msUntilNextBackup,
     enabled: true,
     running: false,
   })
@@ -483,9 +634,94 @@ function getNextDailyMs(hour: number): number {
   return next.getTime() - now.getTime()
 }
 
+/** Run one scheduled task. `signal` is aborted by the watchdog when the run outlives its limit. */
+async function executeTask(id: string, signal: AbortSignal): Promise<{ ok: boolean; message: string }> {
+  return id === 'auto_backup' ? await runBackup(signal)
+    : id === 'agent_heartbeat' ? await runHeartbeatCheck()
+    : id === 'webhook_retry' ? await processWebhookRetries()
+    : id === 'claude_session_scan' ? await syncClaudeSessions()
+    : id === 'skill_sync' ? await syncSkillsFromDisk()
+    : id === 'local_agent_sync' ? await syncLocalAgents()
+    : id === 'gateway_agent_sync' ? await syncAgentsFromConfig('scheduled').then(async r => {
+        const refreshed = await syncAgentLiveStatuses()
+        return { ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed` }
+      })
+    : id === 'task_dispatch' ? await autoRouteInboxTasks().then(async (routeResult) => {
+        const dispatchResult = await dispatchAssignedTasks()
+        const parts = [routeResult.message, dispatchResult.message].filter(m => m && !m.includes('No '))
+        return { ok: routeResult.ok && dispatchResult.ok, message: parts.join(' | ') || 'No tasks to route or dispatch' }
+      })
+    : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
+    : id === 'stale_task_requeue' ? await requeueStaleTasks()
+    : id === 'claim_lease_sweep' ? await runClaimLeaseSweep()
+    : await runCleanup()
+}
+
+/**
+ * Log and audit what a run did. A success clears the task's failure streak (and says so when it
+ * ends one). A failure, whether returned as `{ ok: false }`, thrown, or a watchdog timeout, is
+ * logged and audited: the backup every time (its failure rows are the signal the freshness
+ * alert used to be the only substitute for), any other task once an hour while it keeps failing,
+ * with the streak length so a task that has been down for a day reads as one.
+ * `source: 'result'` means the runner already reported it itself (runBackup does, so a manual
+ * trigger is covered too). Never throws.
+ */
+function recordTaskOutcome(
+  id: string,
+  task: ScheduledTask,
+  ok: boolean,
+  message: string,
+  info: { source: 'result' | 'error'; timedOut: boolean; err?: unknown },
+): void {
+  try {
+    if (ok) {
+      const streak = task.consecutiveFailures ?? 0
+      if (streak > 0) {
+        logger.info({ task: id, failed_runs: streak }, `Scheduler task ${id} recovered after ${streak} failed run(s)`)
+      }
+      task.consecutiveFailures = 0
+      task.lastFailureReportAt = null
+      return
+    }
+
+    const streak = (task.consecutiveFailures ?? 0) + 1
+    task.consecutiveFailures = streak
+    const nowMs = Date.now()
+    const isBackup = id === 'auto_backup'
+    if (isBackup && info.source === 'result') return // runBackup logged and audited it
+
+    const repeatDue = task.lastFailureReportAt == null || nowMs - task.lastFailureReportAt >= REPORT_REPEAT_MS
+    if (!isBackup && !repeatDue) return
+    task.lastFailureReportAt = nowMs
+    logger.error(
+      { task: id, err: info.err, timed_out: info.timedOut, consecutive_failures: streak },
+      `Scheduler task ${id} failed (${streak} in a row): ${message}`,
+    )
+    logAuditEvent({
+      action: isBackup ? 'auto_backup_failed' : 'scheduler_task_failed',
+      actor: 'scheduler',
+      detail: isBackup
+        ? { message, timed_out: info.timedOut, consecutive_failures: streak }
+        : { task: id, message, timed_out: info.timedOut, consecutive_failures: streak },
+    })
+  } catch (err) {
+    logger.error({ err, task: id }, 'Could not record scheduler task outcome')
+  }
+}
+
+/** When a task runs again: the backup on its 03:00 UTC slot (or the retry backoff after a failure), everything else one interval after the tick. */
+function nextRunAfter(id: string, task: ScheduledTask, tickMs: number): number {
+  if (id === 'auto_backup') {
+    return task.lastResult?.ok ? nextBackupSlot(Date.now()) : Date.now() + BACKUP_RETRY_MS
+  }
+  return tickMs + task.intervalMs
+}
+
 /** Check and run due tasks */
 async function tick() {
   const now = Date.now()
+
+  runBackupHousekeeping(now)
 
   for (const [id, task] of tasks) {
     if (task.running || now < task.nextRun) continue
@@ -507,33 +743,38 @@ async function tick() {
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
+    task.runningSince = now
+    task.stage = undefined
+    const abort = new AbortController()
+    const timeoutMs = TASK_TIMEOUT_MS[id] ?? DEFAULT_TASK_TIMEOUT_MS
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
     try {
-      const result = id === 'auto_backup' ? await runBackup()
-        : id === 'agent_heartbeat' ? await runHeartbeatCheck()
-        : id === 'webhook_retry' ? await processWebhookRetries()
-        : id === 'claude_session_scan' ? await syncClaudeSessions()
-        : id === 'skill_sync' ? await syncSkillsFromDisk()
-        : id === 'local_agent_sync' ? await syncLocalAgents()
-        : id === 'gateway_agent_sync' ? await syncAgentsFromConfig('scheduled').then(async r => {
-            const refreshed = await syncAgentLiveStatuses()
-            return { ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed` }
-          })
-        : id === 'task_dispatch' ? await autoRouteInboxTasks().then(async (routeResult) => {
-            const dispatchResult = await dispatchAssignedTasks()
-            const parts = [routeResult.message, dispatchResult.message].filter(m => m && !m.includes('No '))
-            return { ok: routeResult.ok && dispatchResult.ok, message: parts.join(' | ') || 'No tasks to route or dispatch' }
-          })
-        : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
-        : id === 'stale_task_requeue' ? await requeueStaleTasks()
-        : id === 'claim_lease_sweep' ? await runClaimLeaseSweep()
-        : await runCleanup()
+      // The watchdog: a run that never settles is released after `timeoutMs` instead of holding
+      // `running: true` until the next restart. The abandoned call is told to stop (the backup
+      // honours the signal) and anything it settles with later is ignored.
+      const result = await Promise.race([
+        executeTask(id, abort.signal),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true
+            abort.abort()
+            reject(new TaskTimeoutError(id, timeoutMs, task.stage))
+          }, timeoutMs)
+        }),
+      ])
       task.lastResult = { ...result, timestamp: now }
+      recordTaskOutcome(id, task, result.ok, result.message, { source: 'result', timedOut: false })
     } catch (err: any) {
-      task.lastResult = { ok: false, message: err.message, timestamp: now }
+      const message = err?.message ?? String(err)
+      task.lastResult = { ok: false, message, timestamp: now }
+      recordTaskOutcome(id, task, false, message, { source: 'error', timedOut, err })
     } finally {
+      clearTimeout(timer)
       task.running = false
+      task.runningSince = null
       task.lastRun = now
-      task.nextRun = now + task.intervalMs
+      task.nextRun = nextRunAfter(id, task, now)
     }
   }
 }
@@ -547,6 +788,8 @@ export function getSchedulerStatus() {
     lastRun: number | null
     nextRun: number
     running: boolean
+    runningSince: number | null
+    consecutiveFailures: number
     lastResult?: { ok: boolean; message: string; timestamp: number }
   }> = []
 
@@ -571,6 +814,8 @@ export function getSchedulerStatus() {
       lastRun: task.lastRun,
       nextRun: task.nextRun,
       running: task.running,
+      runningSince: task.runningSince ?? null,
+      consecutiveFailures: task.consecutiveFailures ?? 0,
       lastResult: task.lastResult,
     })
   }

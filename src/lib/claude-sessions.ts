@@ -36,6 +36,45 @@ const DEFAULT_PRICING = { input: 3 / 1_000_000, output: 15 / 1_000_000 }
 const ACTIVE_THRESHOLD_MS = 90 * 60 * 1000
 const FUTURE_TOLERANCE_MS = 60 * 1000
 
+/**
+ * One session file gets this long. MC 1728: on 13 Oct 04:36 UTC a `for await` over readline never
+ * finished on a file the process had read to its end and still held open, so the whole scan
+ * (claude_session_scan) stopped for good with no error. A file that will not finish now costs
+ * that file, and the log names it.
+ */
+const PARSE_FILE_TIMEOUT_MS = 30 * 1000
+
+class ParseTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`parse timed out after ${Math.round(timeoutMs / 1000)}s`)
+    this.name = 'ParseTimeoutError'
+  }
+}
+
+/** Yields `lines`, but gives up with a ParseTimeoutError once `ms` have passed since the first call, whether or not the source is still pending. */
+async function* withFileDeadline(lines: AsyncIterable<string>, ms: number, abandon: () => void): AsyncGenerator<string> {
+  const iterator = lines[Symbol.asyncIterator]()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // Reject first: closing the interface makes the pending read finish "done", and that must
+      // not win the race and pass a half-read file off as a complete one.
+      reject(new ParseTimeoutError(ms))
+      abandon()
+    }, ms)
+  })
+  deadline.catch(() => { /* only matters while raced below */ })
+  try {
+    while (true) {
+      const next = await Promise.race([iterator.next(), deadline])
+      if (next.done) return
+      yield next.value
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 interface SessionStats {
   sessionId: string
   projectSlug: string
@@ -105,13 +144,11 @@ async function parseSessionFile(filePath: string, projectSlug: string, fileMtime
     let lastUserPrompt: string | null = null
     let hasLines = false
 
-    const rl = createInterface({
-      input: createReadStream(filePath, { encoding: 'utf-8' }),
-      crlfDelay: Infinity,
-    })
+    const input = createReadStream(filePath, { encoding: 'utf-8' })
+    const rl = createInterface({ input, crlfDelay: Infinity })
 
     try {
-      for await (const line of rl) {
+      for await (const line of withFileDeadline(rl, PARSE_FILE_TIMEOUT_MS, () => { input.destroy(); rl.close() })) {
         if (!line) continue
         hasLines = true
 
@@ -211,6 +248,10 @@ async function parseSessionFile(filePath: string, projectSlug: string, fileMtime
       isActive,
     }
   } catch (err) {
+    if (err instanceof ParseTimeoutError) {
+      logger.warn({ filePath, fileSizeBytes, timeoutMs: err.timeoutMs }, `Claude session file parse timed out after ${Math.round(err.timeoutMs / 1000)}s, skipping it`)
+      return null
+    }
     logger.warn({ err, filePath }, 'Failed to parse Claude session file')
     return null
   }

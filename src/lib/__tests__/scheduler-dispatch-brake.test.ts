@@ -52,6 +52,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   mock.runOpenClaw.mockResolvedValue(OK_RESPONSE)
   mock.db = createDispatchDb()
+  // The scheduler now makes a missing/old backup due at startup (MC 1728). This fixture has no
+  // backup directory, so the catch-up backup would run first in the first tick and hold the
+  // dispatch behind real file I/O; the brake is what is under test here, not the backup.
+  setSetting(mock.db, 'general.auto_backup', 'false')
   addAgent(mock.db, 'reidar', 'coder')
   addAgent(mock.db, 'stella', 'researcher')
   mock.db.prepare('UPDATE agents SET last_seen = ?').run(Math.floor(NOW_MS / 1000))
