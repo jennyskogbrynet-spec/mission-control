@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -440,13 +440,27 @@ describe('findings of the independent review of PR 1', () => {
     expect(kept).toContain('mc-backup-2026-10-17_02-00-00.db')
   })
 
-  it('a backup this process just finished is not repeated by the catch-up when the directory scan then shows nothing', async () => {
+  it('a backup this process just finished is not repeated by the catch-up when the folder cannot be listed', async () => {
     initScheduler() // no backup at all: catch-up runs one
     await vi.advanceTimersByTimeAsync(2 * MIN)
     expect(mock.backup).toHaveBeenCalledTimes(1)
-    rmSync(BACKUP_DIR, { recursive: true, force: true })
-    await vi.advanceTimersByTimeAsync(30 * MIN)
+    chmodSync(BACKUP_DIR, 0o300) // the file is still there, the listing fails
+    try {
+      await vi.advanceTimersByTimeAsync(30 * MIN)
+      expect(mock.backup).toHaveBeenCalledTimes(1)
+    } finally {
+      chmodSync(BACKUP_DIR, 0o700)
+    }
+  })
+
+  it('but when the folder is emptied or swapped after that backup, the catch-up runs again', async () => {
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * MIN)
     expect(mock.backup).toHaveBeenCalledTimes(1)
+    rmSync(BACKUP_DIR, { recursive: true, force: true })
+    await vi.advanceTimersByTimeAsync(10 * MIN)
+    expect(mock.backup).toHaveBeenCalledTimes(2)
+    expect(finishedBackups()).toHaveLength(1)
   })
 
   it('removes what a run that died left behind and keeps a copy that is in progress', async () => {
@@ -511,6 +525,74 @@ describe('findings of the independent review of PR 1', () => {
     await vi.advanceTimersByTimeAsync(2 * MIN)
     expect(mock.syncClaudeSessions.mock.calls.length).toBeGreaterThanOrEqual(4) // running again, at the normal cadence
     expect(task('claude_session_scan')).toMatchObject({ abandonedRuns: 2, consecutiveFailures: 0, lastResult: expect.objectContaining({ ok: true }) })
+  })
+
+  it('a task parked at the abandoned-run cap is reported every hour, not only once (it must not go silent)', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    mock.syncClaudeSessions.mockImplementation(() => new Promise(() => {}))
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(6 * HOUR)
+    expect(task('claude_session_scan')).toMatchObject({ running: false, abandonedRuns: 3 })
+    const blocked = auditCalls('scheduler_task_blocked').filter(c => c.detail.task === 'claude_session_scan')
+    expect(blocked.length).toBeGreaterThanOrEqual(5) // roughly hourly while parked
+    expect(blocked.length).toBeLessThanOrEqual(6)
+    expect(blocked[0].detail).toMatchObject({ abandoned_runs: 3 })
+    expect(blocked[0].detail.message).toMatch(/timed out/)
+  })
+
+  it('a dispatch that is still running is reported again every 6 h, and its timers are gone when it ends', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    setSetting('general.task_dispatch', 'true')
+    mock.dispatch.mockImplementationOnce(
+      () => new Promise(resolve => setTimeout(() => resolve({ ok: true, message: 'done' }), 13 * HOUR)),
+    )
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(14 * HOUR)
+    const stalled = auditCalls('scheduler_task_stalled').filter(c => c.detail.task === 'task_dispatch')
+    expect(stalled.map(c => c.detail.minutes)).toEqual([30, 360, 720])
+    expect(task('task_dispatch').lastResult).toMatchObject({ ok: true })
+  })
+
+  it('the backoff counts timeouts, not failures in general: ten plain failures then one timeout waits 5 minutes', async () => {
+    plantBackup('mc-backup-2026-10-14_03-00-32.db', 5 * HOUR)
+    mock.syncClaudeSessions.mockResolvedValue({ ok: false, message: 'EMFILE' })
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(12 * MIN) // ~10 failed runs, one a minute
+    expect(task('claude_session_scan').consecutiveFailures).toBeGreaterThanOrEqual(10)
+    const before = mock.syncClaudeSessions.mock.calls.length
+    mock.syncClaudeSessions.mockImplementation(() => new Promise(() => {}))
+    await vi.advanceTimersByTimeAsync(12 * MIN) // hangs once, released after 10 min
+    expect(task('claude_session_scan').lastResult!.message).toMatch(/timed out/)
+    const afterTimeout = mock.syncClaudeSessions.mock.calls.length
+    expect(afterTimeout).toBeGreaterThan(before)
+    await vi.advanceTimersByTimeAsync(3 * MIN) // inside the 5 min backoff: no new call
+    expect(mock.syncClaudeSessions.mock.calls.length).toBe(afterTimeout)
+    await vi.advanceTimersByTimeAsync(4 * MIN) // past it
+    expect(mock.syncClaudeSessions.mock.calls.length).toBe(afterTimeout + 1)
+  })
+
+  it('a copy this process is still writing is never removed as stale, however quiet its file is', async () => {
+    plantBackup('mc-backup-2026-10-12_03-00-32.db', 30 * HOUR) // overdue: a scheduled backup runs
+    const slowPartial = join(BACKUP_DIR, 'mc-backup-2026-10-14_06-30-00_manual.db.partial')
+    let manualDone: () => void = () => {}
+    mock.backup.mockImplementationOnce((dest: string) => new Promise(resolve => {
+      // the "manual" copy: has written its partial long ago and is stuck waiting
+      writeFileSync(dest, 'x'.repeat(100))
+      const old = new Date(Date.now() - 3 * HOUR)
+      utimesSync(dest, old, old)
+      manualDone = () => resolve({ totalPages: 1, remainingPages: 0 })
+    }))
+    const manual = triggerTask('auto_backup')
+    await vi.advanceTimersByTimeAsync(0)
+    const inFlightPartial = readdirSync(BACKUP_DIR).find(f => f.endsWith('.partial'))!
+    expect(inFlightPartial).toBeDefined()
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(2 * MIN) // the scheduled catch-up starts and runs removeStalePartials
+    expect(mock.backup).toHaveBeenCalledTimes(2)
+    expect(existsSync(join(BACKUP_DIR, inFlightPartial))).toBe(true)
+    manualDone()
+    expect((await manual).ok).toBe(true)
+    void slowPartial
   })
 
   it('after a timeout the task waits 5 minutes before its next run, not one interval', async () => {
